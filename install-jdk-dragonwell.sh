@@ -74,6 +74,8 @@ if [[ $downloadUrl =~ "linux" ]]; then
   untarDirName=`tar -ztf $filePath | head -1 | cut -f1 -d'/'`
   # 删除压缩文件
   rm -f $filePath
+  # 删除含有 JAVA_HOME 的行
+  sed -i '/JAVA_HOME/d' /etc/profile
   # 设置环境变量
   echo "export JAVA_HOME=$downloadDir/$untarDirName" >> /etc/profile
   echo "export PATH=\$JAVA_HOME/bin:\$PATH" >> /etc/profile
