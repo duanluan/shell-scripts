@@ -7,7 +7,6 @@
 # version:      v1.0
 #===============================================================
 
-echo "激活微信主窗口"
 # 是否安装 dbus
 if [ ! -x /usr/bin/dbus-send ]; then
   echo "安装 dbus"
@@ -41,7 +40,6 @@ items=$(qdbus org.kde.StatusNotifierWatcher /StatusNotifierWatcher org.kde.Statu
 for item in $items; do
   # 是否包含微信 PID
   if [[ $item =~ $wechat_pid ]]; then
-    echo $item
     # 获取项目名称
     item_name=$(echo "$item" | cut -d'/' -f1)
     # 激活微信主窗口
