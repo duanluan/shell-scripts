@@ -13,6 +13,12 @@ if [ ! -x /usr/bin/dbus-send ]; then
   sudo apt install dbus -y
 fi
 
+# 是否安装 qdbus-qt5
+if [ ! -x /usr/bin/qdbus ]; then
+  echo "安装 qdbus-qt5"
+  sudo apt install qdbus-qt5 -y
+fi
+
 wechat_path="/usr/bin/wechat"
 
 # 是否安装 Linux 版微信
