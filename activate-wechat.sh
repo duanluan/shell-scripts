@@ -4,8 +4,11 @@
 # description:   激活托盘区和任务栏的微信主窗口
 # author:        duanluan<duanluan@outlook.com>
 # date:          2025-11-07
-# version:       v1.1
+# version:       v1.2
 # changelog:
+#   v1.2:
+#     - 解决非终端环境无法弹出 sudo 密码框的问题
+#     - 自动检测 TTY：终端内使用 sudo，GUI 环境使用 pkexec
 #   v1.1:
 #     - 增加 wmctrl 依赖
 #     - 修复任务栏窗口无法激活到前台的问题 (先关闭再激活)
@@ -13,13 +16,41 @@
 #     - 修正不同发行版的依赖包名称 (e.g. qt5-qdbus-bin vs qt5-tools)
 #===============================================================
 
-# 🚀 自动依赖处理
-# ---------------------------------------------------------------
-# 1. 探测包管理器
+# 微信可执行文件路径
+WECHAT_PATH="/usr/bin/wechat"
+
+# [ -t 1 ] 检查标准输出是否连接到终端
+if [ -t 1 ]; then
+  # 在终端中运行，使用 sudo
+  SUDO_CMD="sudo"
+else
+  # 非终端环境 (例如：GUI 点击)，尝试使用 pkexec
+  if command -v pkexec >/dev/null 2>&1; then
+    SUDO_CMD="pkexec"
+    echo "ℹ️ 非终端环境，使用 pkexec 获取权限。"
+  else
+    # 警告：未找到 pkexec，可能无法弹出密码框
+    echo "⚠️ 警告：非终端环境，且未找到 'pkexec'。"
+    echo "⚠️ 自动安装依赖可能失败，因为它无法弹出密码框。"
+    echo "⚠️ 请尝试先在终端中手动运行此脚本一次。"
+
+    # 仍然退回到 sudo，万一用户配置了 NOPASSWD
+    SUDO_CMD="sudo"
+
+    # 尝试使用 zenity/kdialog 发出图形化警告
+    # (放到子 shell & 后台运行，避免阻塞主流程)
+    local_warn_msg="未找到 'pkexec'。\n\n自动安装依赖可能无法弹出密码框。\n\n请尝试先在**终端**中手动运行此脚本一次。"
+    if command -v zenity >/dev/null 2>&1; then
+        (zenity --warning --text="$local_warn_msg" --title="微信激活脚本依赖警告" &)
+    elif command -v kdialog >/dev/null 2>&1; then
+        (kdialog --warningcontinuecancel "$local_warn_msg" --title="微信激活脚本依赖警告" &)
+    fi
+  fi
+fi
+
+# 探测包管理器
 PKG_MANAGER=""
 INSTALL_CMD=""
-SUDO_CMD="sudo" # 假设 sudo 存在
-
 if command -v apt >/dev/null 2>&1; then
   PKG_MANAGER="apt"
   INSTALL_CMD="$SUDO_CMD apt install -y"
@@ -44,7 +75,7 @@ else
   # 不退出，也许依赖已经存在
 fi
 
-# 2. 定义检查和安装函数
+# 定义检查和安装函数
 check_and_install() {
   local cmd_to_check=$1
   local deb_pkg=$2
@@ -71,15 +102,18 @@ check_and_install() {
 
           # 特殊处理：RHEL/CentOS 上的 wmctrl 需要 EPEL
           if [ "$cmd_to_check" == "wmctrl" ] && [ -f /etc/redhat-release ] && ! command -v wmctrl >/dev/null 2>&1; then
-             echo "ℹ️ 在 RHEL/CentOS 上, wmctrl 需要 EPEL 仓库。"
-             echo "ℹ️ 正在尝试安装 epel-release..."
-             $SUDO_CMD $PKG_MANAGER install -y epel-release >/dev/null 2>&1
+            echo "ℹ️ 在 RHEL/CentOS 上, wmctrl 需要 EPEL 仓库。"
+            echo "ℹ️ 正在尝试安装 epel-release..."
+            # $SUDO_CMD $PKG_MANAGER install -y epel-release >/dev/null 2>&1
+            # 使用 $INSTALL_CMD 保持一致性
+            $SUDO_CMD $PKG_MANAGER install -y epel-release
           fi
           ;;
       esac
 
       # 执行安装
       if [ -n "$package_to_install" ]; then
+        # $INSTALL_CMD 已经包含了 $SUDO_CMD
         $INSTALL_CMD "$package_to_install"
       else
         echo "❌ 未知包管理器，无法确定包名。"
@@ -92,27 +126,22 @@ check_and_install() {
 
     # 再次检查
     if ! command -v "$cmd_to_check" >/dev/null 2>&1; then
-       echo "❌ 安装后仍未找到 $cmd_to_check。请检查路径或安装是否成功。"
-       exit 1
+      echo "❌ 安装后仍未找到 $cmd_to_check。请检查路径或安装是否成功。"
+      exit 1
     else
-       echo "✅ $cmd_to_check 安装成功。"
+      echo "✅ $cmd_to_check 安装成功。"
     fi
   fi
 }
 
-# 3. 执行所有依赖检查
+# 执行所有依赖检查
 # 命令 | Debian/Ubuntu 包 | Arch 包 | Fedora/RHEL 包
 check_and_install "dbus-send" "dbus" "dbus" "dbus-tools"
 check_and_install "qdbus" "qt5-qdbus-bin" "qt5-tools" "qt5-qttools"
 check_and_install "wmctrl" "wmctrl" "wmctrl" "wmctrl"
-# ---------------------------------------------------------------
-# 依赖检查结束
-
-
-wechat_path="/usr/bin/wechat"
 
 # 是否安装 Linux 版微信
-if [ ! -x "$wechat_path" ]; then
+if [ ! -x "$WECHAT_PATH" ]; then
   echo "未安装微信 Linux 版：https://linux.weixin.qq.com/"
   exit 1
 fi
@@ -124,7 +153,7 @@ if [ -z "$wechat_pid" ]; then
   # 是否启动微信
   # read -p "是否启动微信？(y/n): " is_start
   # if [ "$is_start" == "y" ]; then
-  #   $wechat_path &
+  #   $WECHAT_PATH &
   # fi
   exit 1
 fi
