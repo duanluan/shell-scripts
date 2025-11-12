@@ -1,11 +1,15 @@
 #!/bin/bash
 #===============================================================
 # title:         activate-wechat.sh
-# description:   激活托盘区和任务栏的微信主窗口
+# description:   激活托盘区和任务栏的微信主窗口 (支持 X11 & Wayland)
 # author:        duanluan<duanluan@outlook.com>
-# date:          2025-11-07
-# version:       v1.2
+# date:          2025-11-12
+# version:       v1.3
 # changelog:
+#   v1.3:
+#     - 新增显示服务类型检测 (X11 vs Wayland)
+#     - 完善 Wayland 下的逻辑：利用 XWayland 兼容性通过 wmctrl 操作窗口
+#     - 优化日志输出，明确当前运行环境
 #   v1.2:
 #     - 解决非终端环境无法弹出 sudo 密码框的问题
 #     - 自动检测 TTY：终端内使用 sudo，GUI 环境使用 pkexec
@@ -80,7 +84,8 @@ check_and_install() {
   local cmd_to_check=$1
   local deb_pkg=$2
   local arch_pkg=$3
-  local fedora_pkg=$4 # (dnf/yum)
+  # (dnf/yum)
+  local fedora_pkg=$4
 
   # 检查命令是否存在
   if ! command -v "$cmd_to_check" >/dev/null 2>&1; then
@@ -104,7 +109,6 @@ check_and_install() {
           if [ "$cmd_to_check" == "wmctrl" ] && [ -f /etc/redhat-release ] && ! command -v wmctrl >/dev/null 2>&1; then
             echo "ℹ️ 在 RHEL/CentOS 上, wmctrl 需要 EPEL 仓库。"
             echo "ℹ️ 正在尝试安装 epel-release..."
-            # $SUDO_CMD $PKG_MANAGER install -y epel-release >/dev/null 2>&1
             # 使用 $INSTALL_CMD 保持一致性
             $SUDO_CMD $PKG_MANAGER install -y epel-release
           fi
@@ -150,33 +154,47 @@ fi
 wechat_pid=$(pgrep -x "wechat")
 if [ -z "$wechat_pid" ]; then
   echo "未找到微信进程"
-  # 是否启动微信
-  # read -p "是否启动微信？(y/n): " is_start
-  # if [ "$is_start" == "y" ]; then
-  #   $WECHAT_PATH &
-  # fi
   exit 1
 fi
 
+# 🖥️ 检测显示服务类型 (X11 or Wayland)
+# 默认设为 x11 以防变量为空
+SESSION_TYPE="${XDG_SESSION_TYPE:-x11}"
+echo "ℹ️ 检测到会话类型: $SESSION_TYPE"
+
 # 🚀 检查微信窗口是否已在任务栏 (核心修改)
-# 1. 使用 wmctrl -l -p 列出所有窗口，-p 包含 PID
-# 2. awk 筛选出 PID ($3) 匹配 $wechat_pid 的行
-# 3. 提取窗口 ID ($1)
-# 4. head -n1 只取第一个匹配的窗口
+# 逻辑：
+# 1. 无论是 X11 还是 Wayland，微信通常通过 XWayland 运行。
+# 2. wmctrl 通常可以列出 XWayland 的窗口。
+# 3. 如果找到窗口，执行“关闭”操作以强制其最小化到托盘。
+# 4. 这样随后的 Activate 信号才能确保窗口弹出到最前。
+
+# 使用 wmctrl -l -p 列出所有窗口，-p 包含 PID
+# awk 筛选出 PID ($3) 匹配 $wechat_pid 的行
+# head -n1 只取第一个匹配的窗口
 window_id=$(wmctrl -l -p | awk -v pid="$wechat_pid" '$3 == pid {print $1}' | head -n1)
 
 if [ -n "$window_id" ]; then
-  echo "ℹ️ 发现微信窗口 ($window_id) 存在于任务栏，正在尝试关闭以最小化到托盘..."
+  echo "ℹ️ 发现微信窗口 ($window_id) 存在于任务栏/桌面，正在尝试先关闭..."
+
+  # 针对 Wayland 的额外日志
+  if [[ "$SESSION_TYPE" == "wayland" ]]; then
+     echo "   (Wayland 模式下，依赖 XWayland 支持来操作窗口)"
+  fi
+
   # -i 通过窗口 ID 操作, -c 关闭窗口 (微信会最小化到托盘)
   wmctrl -i -c "$window_id"
+
   # 给予 0.2 秒让窗口完成关闭/最小化到托盘的动作
+  # 这个等待非常重要，否则 Activate 信号可能在窗口还没消失前就触发，导致置顶失败
   sleep 0.2
 else
-  echo "ℹ️ 微信窗口未在任务栏找到，将直接从托盘激活。"
+  echo "ℹ️ 微信窗口未在任务栏找到 (或已最小化/Wayland限制)，将直接从托盘激活。"
 fi
 
 
 # 获取所有注册的 StatusNotifierItem
+# 这一步是跨平台标准的 (FreeDesktop StatusNotifierItem)，在 KDE/GNOME(需插件) 的 X11 和 Wayland 下通用
 items=$(qdbus org.kde.StatusNotifierWatcher /StatusNotifierWatcher org.kde.StatusNotifierWatcher.RegisteredStatusNotifierItems)
 
 found=0
@@ -185,10 +203,13 @@ for item in $items; do
   # 是否包含微信 PID
   if [[ $item =~ $wechat_pid ]]; then
     found=1
-    # 获取项目名称
+    # 获取项目名称 (去掉路径前缀)
     item_name=$(echo "$item" | cut -d'/' -f1)
-    echo "OK! 正在激活: $item_name"
+    echo "🚀 OK! 正在发送 D-Bus Activate 信号: $item_name"
+
     # 激活微信主窗口
+    # method_call Activate int32:x int32:y
+    # 参数 0 0 代表点击坐标，通常传 0 即可
     dbus-send --session --type=method_call --dest="$item_name" /StatusNotifierItem org.kde.StatusNotifierItem.Activate int32:0 int32:0
     break
   fi
@@ -196,4 +217,5 @@ done
 
 if [ $found -eq 0 ]; then
   echo "❌ 未在 D-Bus 中找到微信的 StatusNotifierItem。"
+  echo "   可能原因：微信托盘图标未加载，或 GNOME 缺少 AppIndicator 扩展。"
 fi
