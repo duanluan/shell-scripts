@@ -36,7 +36,7 @@
 declare -a proxies=(
     "prefix:https://gh-proxy.com/"
     "prefix:https://ghproxy.net/"
-    "replace:https://bgithub.xyz/"
+    # "replace:https://bgithub.xyz/"
     # 在这里添加更多...
 )
 # --- 随机选择一个代理条目 ---
