@@ -3,9 +3,13 @@
 # title:         activate-wechat.sh
 # description:   激活托盘区和任务栏的微信主窗口 (支持 X11 & Wayland)
 # author:        duanluan<duanluan@outlook.com>
-# date:          2025-11-12
-# version:       v1.3
+# date:          2025-12-13
+# version:       v1.4
 # changelog:
+#   v1.4:
+#     - 新增文件锁 (flock) 机制，防止快捷键连按导致并发运行冲突
+#     - 修复非终端环境下无 pkexec 且 sudo 需要密码时的死锁问题
+#     - 优化窗口关闭等待逻辑：轮询检测 (Smart Wait)
 #   v1.3:
 #     - 新增显示服务类型检测 (X11 vs Wayland)
 #     - 完善 Wayland 下的逻辑：利用 XWayland 兼容性通过 wmctrl 操作窗口
@@ -20,6 +24,24 @@
 #     - 修正不同发行版的依赖包名称 (e.g. qt5-qdbus-bin vs qt5-tools)
 #===============================================================
 
+# ===============================================================
+# 🔒 防连按/并发锁 (Singleton Lock)
+# 防止用户因为反应慢而狂按快捷键，导致多个脚本实例同时运行产生冲突
+# ===============================================================
+LOCK_FILE="/tmp/activate-wechat-${USER}.lock"
+# 打开文件描述符 200 到锁文件
+exec 200>"$LOCK_FILE"
+# 尝试获取排他锁 (-x)，非阻塞模式 (-n)
+# 如果获取失败（即已有实例在运行），则直接退出
+flock -x -n 200 || {
+    # 这里不需要弹出提示，直接静默退出即可，避免弹出一堆窗口骚扰用户
+    exit 0
+}
+
+# ===============================================================
+# 🟢 脚本主逻辑开始
+# ===============================================================
+
 # 微信可执行文件路径
 WECHAT_PATH="/usr/bin/wechat"
 
@@ -33,21 +55,28 @@ else
     SUDO_CMD="pkexec"
     echo "ℹ️ 非终端环境，使用 pkexec 获取权限。"
   else
-    # 警告：未找到 pkexec，可能无法弹出密码框
-    echo "⚠️ 警告：非终端环境，且未找到 'pkexec'。"
-    echo "⚠️ 自动安装依赖可能失败，因为它无法弹出密码框。"
-    echo "⚠️ 请尝试先在终端中手动运行此脚本一次。"
+    # ⚠️ 关键修改 (v1.4)：防止死锁
+    # 如果没有 pkexec，先检查 sudo 是否配置了 NOPASSWD (免密)
+    # sudo -n (non-interactive) 如果需要密码会返回非零状态
+    if sudo -n true 2>/dev/null; then
+        SUDO_CMD="sudo"
+        echo "⚠️ 警告：非终端环境且未找到 pkexec，但检测到 sudo 免密权限，继续执行。"
+    else
+        # 既无 pkexec 也无免密 sudo，无法弹出密码框，必须退出
+        # 否则脚本会卡在后台等待输入密码 (死锁)
+        echo "❌ 错误：非终端环境，未找到 'pkexec' 且 sudo 需要密码。"
+        echo "❌ 脚本无法弹出密码框，即将退出以避免死锁。"
 
-    # 仍然退回到 sudo，万一用户配置了 NOPASSWD
-    SUDO_CMD="sudo"
+        local_err_msg="未找到 'pkexec' 且 sudo 需要密码。\n\n无法自动安装依赖，请先在**终端**中手动运行此脚本一次。"
 
-    # 尝试使用 zenity/kdialog 发出图形化警告
-    # (放到子 shell & 后台运行，避免阻塞主流程)
-    local_warn_msg="未找到 'pkexec'。\n\n自动安装依赖可能无法弹出密码框。\n\n请尝试先在**终端**中手动运行此脚本一次。"
-    if command -v zenity >/dev/null 2>&1; then
-        (zenity --warning --text="$local_warn_msg" --title="微信激活脚本依赖警告" &)
-    elif command -v kdialog >/dev/null 2>&1; then
-        (kdialog --warningcontinuecancel "$local_warn_msg" --title="微信激活脚本依赖警告" &)
+        # 尝试弹出错误框 (不再后台运行，而是阻塞显示后退出)
+        if command -v zenity >/dev/null 2>&1; then
+            zenity --error --text="$local_err_msg" --title="微信激活脚本错误"
+        elif command -v kdialog >/dev/null 2>&1; then
+            kdialog --error "$local_err_msg" --title="微信激活脚本错误"
+        fi
+
+        exit 1
     fi
   fi
 fi
@@ -179,15 +208,29 @@ if [ -n "$window_id" ]; then
 
   # 针对 Wayland 的额外日志
   if [[ "$SESSION_TYPE" == "wayland" ]]; then
-     echo "   (Wayland 模式下，依赖 XWayland 支持来操作窗口)"
+    echo "   (Wayland 模式下，依赖 XWayland 支持来操作窗口)"
   fi
 
   # -i 通过窗口 ID 操作, -c 关闭窗口 (微信会最小化到托盘)
   wmctrl -i -c "$window_id"
 
-  # 给予 0.2 秒让窗口完成关闭/最小化到托盘的动作
-  # 这个等待非常重要，否则 Activate 信号可能在窗口还没消失前就触发，导致置顶失败
-  sleep 0.2
+  # 🚀 智能等待窗口关闭 (v1.4 修改)
+  # 之前版本使用硬编码 sleep 0.2，可能导致慢机器激活失败或快机器浪费时间。
+  # 现在使用轮询检测：只要窗口 ID 还在，就继续等，直到超时 (2秒)。
+  echo "⏳ 等待窗口最小化..."
+  wait_count=0
+  timeout=20 # 20 * 0.1s = 2s
+
+  while wmctrl -l -p | grep -q "$window_id"; do
+    if [ "$wait_count" -ge "$timeout" ]; then
+      echo "⚠️ 等待窗口关闭超时，将尝试强制激活..."
+      break
+    fi
+    sleep 0.1
+    wait_count=$((wait_count + 1))
+  done
+
+# 如果循环提前结束，说明窗口已关闭，可以立即进行下一步
 else
   echo "ℹ️ 微信窗口未在任务栏找到 (或已最小化/Wayland限制)，将直接从托盘激活。"
 fi
