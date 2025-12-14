@@ -3,8 +3,8 @@
 # title:         github-mirror-axel.sh
 # description:   一个 axel 包装脚本，用于通过镜像加速 GitHub 下载
 # author:        duanluan<duanluan@outlook.com>
-# date:          2025-12-13
-# version:       v2.2
+# date:          2025-12-14
+# version:       v2.3
 # usage:         github-mirror-axel.sh <output_file> <url>
 #
 # description_zh:
@@ -14,6 +14,10 @@
 #   来加速下载。其他 URL 则保持不变。
 #
 # changelog:
+#   v2.3 (2025-12-14):
+#     - 修复: 增加“兜底机制”，最后一次重试时即使速度慢也不中断，防止下载失败
+#     - 优化: 延长速度检测窗口 (5s -> 15s) 以减少网络波动导致的误判
+#     - 调整: 降低最低速度阈值 (100KB/s -> 50KB/s)，增加默认重试次数
 #   v2.2 (2025-12-13):
 #     - 新增: 低速自动切换功能 (若5秒内均速 < 100KB/s 则重试)
 #     - 新增: 智能重试机制 (最大2次，且自动避开刚刚失败的镜像)
@@ -34,9 +38,9 @@
 
 OUTPUT_FILE="$1"
 ORIGINAL_URL="$2"
-MAX_RETRIES=2          # 最大重试次数 (切换两次)
-MIN_SPEED_KB=100       # 最低速度阈值 KB/s (后台监控用)
-CHECK_INTERVAL=5       # 检查间隔 (秒)
+MAX_RETRIES=3          # 最大重试次数 (给更多机会)
+MIN_SPEED_KB=50        # 最低速度阈值 KB/s (降低阈值，稳定优先)
+CHECK_INTERVAL=15      # 检查间隔 (秒) (延长间隔，避免波动误判)
 
 # ===================================================
 # 辅助函数: 获取文件大小 (兼容 Linux 和 macOS)
@@ -135,26 +139,32 @@ while [ $attempt -le $MAX_RETRIES ]; do
     # -----------------------------------------------
     # 3. 输出状态信息
     # -----------------------------------------------
-    # 为了不干扰 axel 的进度条，我们在开始前把信息打印清楚
+    # 判定是否为最后一次尝试
+    is_last_attempt=false
+    if [ $attempt -eq $MAX_RETRIES ]; then
+        is_last_attempt=true
+    fi
+
     if [ $attempt -eq 0 ]; then
         echo "🚀 开始下载 [$proxy_info]"
     else
         echo "--------------------------------------------------------"
         echo "🔄 第 $attempt 次重试 (切换 -> $proxy_info)"
+        if [ "$is_last_attempt" = true ]; then
+            echo "🛡️  这是最后一次尝试，已禁用低速检测！"
+        fi
     fi
-    # 仅在调试时取消注释下面这行
-    # echo "⬇️  URL: $url"
 
     # -----------------------------------------------
     # 4. 启动下载与监控
     # -----------------------------------------------
 
     # 后台启动 axel
-    # -n 2: 使用 2 个连接数
-    # -a: 简洁进度条 (保留原生视觉效果)
+    # -n 4: 增加连接数到 4 (有时能提高稳定性)
+    # -a: 简洁进度条
     # -o $1: 指定输出文件路径
-    # 注意: 不使用 -q，让 axel 输出到前台
-    axel -n 2 -a -o "$OUTPUT_FILE" "$url" &
+    # -k: 允许连接中断时不删除文件 (为可能的断点续传做准备，虽然换镜像通常不建议混用，但作为保险)
+    axel -n 4 -a -k -o "$OUTPUT_FILE" "$url" &
     AXEL_PID=$!
 
     # 初始化监控变量
@@ -172,8 +182,6 @@ while [ $attempt -le $MAX_RETRIES ]; do
         curr_size=$(get_file_size "$OUTPUT_FILE")
         diff=$((curr_size - prev_size))
 
-        # [静默] 不输出当前速度，以免打断 axel 进度条
-
         # 启动缓冲期 (前 5 秒不杀，防止连接建立初期的波动)
         if [ $start_delay -lt 1 ]; then
             ((start_delay++))
@@ -181,14 +189,22 @@ while [ $attempt -le $MAX_RETRIES ]; do
             continue
         fi
 
+        # ===================================================
+        # [核心修复] 兜底逻辑：如果是最后一次尝试，跳过速度检测
+        # ===================================================
+        if [ "$is_last_attempt" = true ]; then
+            prev_size=$curr_size
+            continue
+        fi
+
         # 速度检查
-        # 5秒内的最低字节增量
+        # 计算当前间隔内的最低预期字节增量
         min_bytes=$((MIN_SPEED_KB * 1024 * CHECK_INTERVAL))
 
         if [ $diff -lt $min_bytes ]; then
             # 只有出错时才输出，先 echo 空行把进度条顶上去
             echo ""
-            echo "⚠️  检测到速度过低 (后台均速 < ${MIN_SPEED_KB}KB/s)，正在切换..."
+            echo "⚠️  检测到速度过低 (15s内均速 < ${MIN_SPEED_KB}KB/s)，准备切换..."
             kill $AXEL_PID 2>/dev/null
             wait $AXEL_PID 2>/dev/null
             download_failed=true
@@ -207,16 +223,20 @@ while [ $attempt -le $MAX_RETRIES ]; do
 
     if [ "$download_failed" = true ]; then
         # 速度慢主动停止，清理文件，准备重试
+        # 注意：这里我们删除了文件，因为换镜像后 offset 可能不同，重新开始比 resume 坏文件更安全
         rm -f "$OUTPUT_FILE" "$OUTPUT_FILE.st"
         ((attempt++))
     elif [ $exit_code -eq 0 ]; then
-        # 成功时不需要额外 echo，axel 进度条走到 100% 就是最好的提示
         success=true
         break
     else
+        # 非主动停止的异常退出 (如 404，连接被服务器重置等)
         echo ""
         echo "❌ axel 异常退出 (代码: $exit_code)。"
-        rm -f "$OUTPUT_FILE" "$OUTPUT_FILE.st"
+        # 如果不是最后一次，就清理重试
+        if [ "$is_last_attempt" = false ]; then
+          rm -f "$OUTPUT_FILE" "$OUTPUT_FILE.st"
+        fi
         ((attempt++))
     fi
 
