@@ -3,17 +3,19 @@
 # title:         github-mirror-axel.sh
 # description:   一个 axel 包装脚本，用于通过镜像加速 GitHub 下载
 # author:        duanluan<duanluan@outlook.com>
-# date:          2025-12-14
-# version:       v2.3
+# date:          2025-12-22
+# version:       v2.4
 # usage:         github-mirror-axel.sh <output_file> <url>
 #
 # description_zh:
 #   此脚本旨在替换或包装下载工具（如 axel）。
-#   它会检查传入的 URL ($2)。如果 URL 是 github.com 域名，
+#   它会检查传入的 URL ($2)。如果 URL 是 github.com 或 raw.githubusercontent.com 域名，
 #   它会从一个预定义的列表中随机选择一个镜像（支持 'prefix' 和 'replace' 模式）
 #   来加速下载。其他 URL 则保持不变。
 #
 # changelog:
+#   v2.4 (2025-12-22):
+#     - 新增: 支持 raw.githubusercontent.com 域名的代理加速
 #   v2.3 (2025-12-14):
 #     - 修复: 增加“兜底机制”，最后一次重试时即使速度慢也不中断，防止下载失败
 #     - 优化: 延长速度检测窗口 (5s -> 15s) 以减少网络波动导致的误判
@@ -93,10 +95,11 @@ while [ $attempt -le $MAX_RETRIES ]; do
     num_proxies=${#proxies[@]}
     selected_entry=""
 
-    # 仅针对 github.com 启用代理逻辑
+    # 解析域名
     domin=$(echo "$ORIGINAL_URL" | cut -f3 -d'/')
 
-    if [[ "$domin" == *"github.com"* ]] && [ "$num_proxies" -gt 0 ]; then
+    # 仅针对 github.com 和 raw.githubusercontent.com 启用代理逻辑
+    if ([[ "$domin" == *"github.com"* ]] || [[ "$domin" == "raw.githubusercontent.com" ]]) && [ "$num_proxies" -gt 0 ]; then
         # 生成随机索引
         random_index=$(($RANDOM % $num_proxies))
 
@@ -235,7 +238,7 @@ while [ $attempt -le $MAX_RETRIES ]; do
         echo "❌ axel 异常退出 (代码: $exit_code)。"
         # 如果不是最后一次，就清理重试
         if [ "$is_last_attempt" = false ]; then
-          rm -f "$OUTPUT_FILE" "$OUTPUT_FILE.st"
+            rm -f "$OUTPUT_FILE" "$OUTPUT_FILE.st"
         fi
         ((attempt++))
     fi
