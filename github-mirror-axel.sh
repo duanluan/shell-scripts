@@ -3,8 +3,8 @@
 # title:         github-mirror-axel.sh
 # description:   一个 axel 包装脚本，用于通过镜像加速 GitHub 下载
 # author:        duanluan<duanluan@outlook.com>
-# date:          2025-12-22
-# version:       v2.4
+# date:          2025-12-30
+# version:       v2.5
 # usage:         github-mirror-axel.sh <output_file> <url>
 #
 # description_zh:
@@ -14,6 +14,9 @@
 #   来加速下载。其他 URL 则保持不变。
 #
 # changelog:
+#   v2.5 (2025-12-30):
+#     - 修复: 启动时若存在同名文件但无进度文件(.st)，会导致 axel 报错退出的问题 (改为自动备份旧文件)
+#     - 修复: 非镜像（直连）模式下不再触发低速自动切换，避免非 GitHub 链接因网速慢被误杀
 #   v2.4 (2025-12-22):
 #     - 新增: 支持 raw.githubusercontent.com 域名的代理加速
 #   v2.3 (2025-12-14):
@@ -162,6 +165,14 @@ while [ $attempt -le $MAX_RETRIES ]; do
     # 4. 启动下载与监控
     # -----------------------------------------------
 
+    # 检查“僵尸”文件
+    # 如果文件存在但 .st 不存在，axel 会因为无法断点续传而直接报错退出。
+    # 这种情况通常是上次下载失败残留的，我们将其备份以便重新下载。
+    if [ $attempt -eq 0 ] && [ -f "$OUTPUT_FILE" ] && [ ! -f "$OUTPUT_FILE.st" ]; then
+        echo "⚠️  检测到残留文件但无进度信息，无法恢复。正在备份为 .bak 并重新开始..."
+        mv "$OUTPUT_FILE" "${OUTPUT_FILE}.bak.$(date +%s)"
+    fi
+
     # 后台启动 axel
     # -n 4: 增加连接数到 4 (有时能提高稳定性)
     # -a: 简洁进度条
@@ -192,9 +203,7 @@ while [ $attempt -le $MAX_RETRIES ]; do
             continue
         fi
 
-        # ===================================================
-        # [核心修复] 兜底逻辑：如果是最后一次尝试，跳过速度检测
-        # ===================================================
+        # 兜底逻辑：如果是最后一次尝试，跳过速度检测
         if [ "$is_last_attempt" = true ]; then
             prev_size=$curr_size
             continue
@@ -204,7 +213,8 @@ while [ $attempt -le $MAX_RETRIES ]; do
         # 计算当前间隔内的最低预期字节增量
         min_bytes=$((MIN_SPEED_KB * 1024 * CHECK_INTERVAL))
 
-        if [ $diff -lt $min_bytes ]; then
+        # 只有在使用镜像代理时才检测低速切换，直连时不中断
+        if [ -n "$proxy_type" ] && [ $diff -lt $min_bytes ]; then
             # 只有出错时才输出，先 echo 空行把进度条顶上去
             echo ""
             echo "⚠️  检测到速度过低 (15s内均速 < ${MIN_SPEED_KB}KB/s)，准备切换..."
