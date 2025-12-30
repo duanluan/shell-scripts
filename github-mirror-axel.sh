@@ -4,7 +4,7 @@
 # description:   一个 axel 包装脚本，用于通过镜像加速 GitHub 下载
 # author:        duanluan<duanluan@outlook.com>
 # date:          2025-12-30
-# version:       v2.5
+# version:       v3.0
 # usage:         github-mirror-axel.sh <output_file> <url>
 #
 # description_zh:
@@ -14,6 +14,8 @@
 #   来加速下载。其他 URL 则保持不变。
 #
 # changelog:
+#   v3.0 (2025-12-30):
+#     - 新增: 自我更新功能，运行 --self-update 即可通过镜像检测并更新脚本自身
 #   v2.5 (2025-12-30):
 #     - 修复: 启动时若存在同名文件但无进度文件(.st)，会导致 axel 报错退出的问题 (改为自动备份旧文件)
 #     - 修复: 非镜像（直连）模式下不再触发低速自动切换，避免非 GitHub 链接因网速慢被误杀
@@ -43,9 +45,14 @@
 
 OUTPUT_FILE="$1"
 ORIGINAL_URL="$2"
-MAX_RETRIES=3          # 最大重试次数 (给更多机会)
-MIN_SPEED_KB=50        # 最低速度阈值 KB/s (降低阈值，稳定优先)
-CHECK_INTERVAL=15      # 检查间隔 (秒) (延长间隔，避免波动误判)
+MAX_RETRIES=3          # 最大重试次数
+MIN_SPEED_KB=50        # 最低速度阈值 KB/s
+CHECK_INTERVAL=15      # 检查间隔 (秒)
+
+# 更新相关配置
+UPDATE_SOURCE_URL="https://raw.githubusercontent.com/duanluan/shell-scripts/refs/heads/main/github-mirror-axel.sh"
+LAST_CHECK_FILE="$HOME/.cache/github-mirror-axel.last_check"
+CHECK_COOLDOWN=86400  # 冷却时间：24小时 (秒)
 
 # ===================================================
 # 辅助函数: 获取文件大小 (兼容 Linux 和 macOS)
@@ -77,9 +84,115 @@ declare -a proxies=(
     # 在这里添加更多...
 )
 
+# ===================================================
+# 自我更新检查逻辑
+# ===================================================
+check_self_update() {
+    local force_check=$1
+    local current_time=$(date +%s)
+
+    # ---------------------------------------------------
+    # 冷却检查逻辑
+    # ---------------------------------------------------
+    if [ "$force_check" != "true" ]; then
+        if [ -f "$LAST_CHECK_FILE" ]; then
+            last_check=$(cat "$LAST_CHECK_FILE")
+            elapsed=$((current_time - last_check))
+            if [ $elapsed -lt $CHECK_COOLDOWN ]; then
+                # 仍在冷却时间内，跳过自动检查
+                return
+            fi
+        fi
+    fi
+
+    echo "🔍 正在检查更新..."
+
+    # 获取当前版本
+    current_ver=$(grep -m1 "# version:" "$0" | awk '{print $3}')
+
+    # 随机选择一个代理来加速更新检测
+    num_proxies=${#proxies[@]}
+    selected_entry=""
+    if [ "$num_proxies" -gt 0 ]; then
+        random_index=$(($RANDOM % $num_proxies))
+        selected_entry="${proxies[$random_index]}"
+    fi
+
+    # 构建代理 URL
+    target_url="$UPDATE_SOURCE_URL"
+    p_url="直连"
+    if [ -n "$selected_entry" ]; then
+        p_type=$(echo "$selected_entry" | cut -d':' -f1)
+        p_url=$(echo "$selected_entry" | cut -d':' -f2-)
+        if [ "$p_type" = "prefix" ]; then
+            target_url="${p_url}${UPDATE_SOURCE_URL}"
+        elif [ "$p_type" = "replace" ]; then
+            target_url="${p_url}$(echo "$UPDATE_SOURCE_URL" | cut -f4- -d'/')"
+        fi
+    fi
+
+    echo "☁️ 正在从远端获取版本信息 (代理: ${p_url})..."
+
+    # 准备缓存目录
+    mkdir -p "$(dirname "$LAST_CHECK_FILE")"
+
+    # 下载到临时文件
+    tmp_script="/tmp/github-mirror-axel.sh.tmp"
+    curl -sL --connect-timeout 10 -o "$tmp_script" "$target_url"
+
+    if [ ! -s "$tmp_script" ]; then
+        echo "❌ 检查更新失败：无法下载脚本文件。"
+        rm -f "$tmp_script"
+        # 即使失败也记录时间，避免频繁报错
+        echo "$current_time" > "$LAST_CHECK_FILE"
+        [ "$force_check" = "true" ] && exit 1 || return
+    fi
+
+    # 记录最后检查时间
+    echo "$current_time" > "$LAST_CHECK_FILE"
+
+    # 提取远程版本
+    remote_ver=$(grep -m1 "# version:" "$tmp_script" | awk '{print $3}')
+
+    if [ -z "$remote_ver" ]; then
+        echo "❌ 检查更新失败：解析远程版本号错误。"
+        rm -f "$tmp_script"
+        [ "$force_check" = "true" ] && exit 1 || return
+    fi
+
+    # 比较版本号
+    ver_local=${current_ver#v}
+    ver_remote=${remote_ver#v}
+    need_update=$(awk -v l="$ver_local" -v r="$ver_remote" 'BEGIN {print (r > l) ? 1 : 0}')
+
+    if [ "$need_update" -eq 1 ]; then
+        echo "🎉 发现新版本: $remote_ver (当前: $current_ver)"
+        echo "📦 正在更新..."
+        mv "$tmp_script" "$0"
+        chmod +x "$0"
+        echo "✅ 更新成功！请重新运行脚本。"
+        exit 0
+    else
+        echo "✅ 当前已是最新版本 ($current_ver)。"
+        rm -f "$tmp_script"
+        if [ "$force_check" = "true" ]; then exit 0; fi
+    fi
+}
+
+# ---------------------------------------------------
+# 参数处理
+# ---------------------------------------------------
+if [ "$1" == "--self-update" ]; then
+    check_self_update "true"
+fi
+
+# 默认执行自动更新检查 (受冷却机制保护)
+check_self_update "false"
+
 # 检查基本参数
 if [ -z "$OUTPUT_FILE" ] || [ -z "$ORIGINAL_URL" ]; then
-    echo "用法: $0 <output_file> <url>"
+    echo "💡 用法: $0 <output_file> <url>"
+    echo "💡 提示: 运行 $0 --self-update 可强制更新本脚本"
     exit 1
 fi
 
@@ -169,7 +282,7 @@ while [ $attempt -le $MAX_RETRIES ]; do
     # 如果文件存在但 .st 不存在，axel 会因为无法断点续传而直接报错退出。
     # 这种情况通常是上次下载失败残留的，我们将其备份以便重新下载。
     if [ $attempt -eq 0 ] && [ -f "$OUTPUT_FILE" ] && [ ! -f "$OUTPUT_FILE.st" ]; then
-        echo "⚠️  检测到残留文件但无进度信息，无法恢复。正在备份为 .bak 并重新开始..."
+        echo "⚠️  检测到残留文件但无进度信息，正在备份并重新开始..."
         mv "$OUTPUT_FILE" "${OUTPUT_FILE}.bak.$(date +%s)"
     fi
 
