@@ -4,7 +4,7 @@
 # description:   一个 axel 包装脚本，用于通过镜像加速 GitHub 下载
 # author:        duanluan<duanluan@outlook.com>
 # date:          2025-12-30
-# version:       v3.0
+# version:       v3.1
 # usage:         github-mirror-axel.sh <output_file> <url>
 #
 # description_zh:
@@ -80,6 +80,7 @@ declare -a proxies=(
     "prefix:https://gh-proxy.com/"
     "prefix:https://ghproxy.net/"
     "prefix:https://ghfast.top/"
+    "prefix:https://fastgit.cc/"
     # "replace:https://bgithub.xyz/"
     # 在这里添加更多...
 )
