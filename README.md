@@ -89,7 +89,9 @@ source ./github-wrappers.sh
 ### `synology-ignore-monitor.sh`
 - 功能：监控 `~/.SynologyDrive/data/session` 下的 `blacklist.filter`，自动注入统一忽略规则（如 `.git`、`node_modules`、`venv`、`dist` 等）。
 - 关键行为：
-  - 若缺少 `inotifywait`，会尝试自动安装 `inotify-tools`。
+  - 若缺少 `inotifywait`，会尝试自动安装 `inotify-tools`（仅在 root、`sudo -n` 免密、或交互式终端可输入密码时）。
+  - `pacman` 环境下若检测到 `/etc/pacman.d/mirrorlist` 没有 `Server`，会先尝试调用 `pacman-mirrors` 自动修复镜像列表再安装。
+  - 自动安装失败时会降级为轮询模式（默认每 5 秒检查一次，可用 `POLL_INTERVAL` 调整）。
   - 启动后先全量扫描并注入一次，再持续监听文件变更并自动补写。
 - 注意事项：
   - 该脚本会长期运行（前台监控）。
