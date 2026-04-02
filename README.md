@@ -7,6 +7,7 @@
 | 脚本 | 主要用途 | 典型环境 | 权限/副作用 |
 | --- | --- | --- | --- |
 | `activate-wechat.sh` | 激活托盘微信窗口（X11/Wayland） | Linux 桌面 | 可能自动安装依赖 |
+| `aur-fix-checksums-and-make.sh` | 遇到 source 校验失败时自动更新 `PKGBUILD` 校验值并继续构建 | Arch Linux / AUR 构建目录 | 会改写 `PKGBUILD` 并执行 `makepkg -si` |
 | `github-mirror-axel.sh` | 用镜像包装 `axel` 下载 GitHub 资源 | 通用 Linux | 会创建缓存文件、自我更新 |
 | `github-wrappers.sh` | 包装 `curl`/`wget`，自动改写 GitHub URL | 交互式 shell | 仅当前 shell 生效 |
 | `install-jdk-dragonwell.sh` | 交互式下载并安装 Dragonwell JDK | Debian/RedHat 系 | 会写 `/opt/java`、`/etc/profile` |
@@ -44,6 +45,23 @@ source ./github-wrappers.sh
   - 默认微信路径是 `/usr/bin/wechat`。
   - 非终端运行时优先走 `pkexec`；若无 `pkexec` 且 `sudo` 需密码，会直接退出避免死锁。
   - 锁文件位于 `/tmp/activate-wechat-${USER}.lock`。
+
+### `aur-fix-checksums-and-make.sh`
+- 功能：在 AUR 包目录里先执行 `makepkg --verifysource`，如果发现一个或多个 source 校验失败，就自动调用 `updpkgsums` 更新 `PKGBUILD`，再继续执行 `makepkg -si`。
+- 适用场景：上游文件内容发生变化，但 AUR 仓库里的校验值还没跟上，例如 `visual-studio-code-bin` 这类会抓取多个上游文本文件的包。
+- 用法：
+  - 在包目录执行：`bash ./aur-fix-checksums-and-make.sh`
+  - 传目录执行：`bash ./aur-fix-checksums-and-make.sh ~/.cache/paru/clone/visual-studio-code-bin`
+  - `yay` 目录执行：`bash ./aur-fix-checksums-and-make.sh ~/.cache/yay/visual-studio-code-bin`
+  - 直接传包名：`aur-fix-checksums-and-make visual-studio-code-bin`
+  - 透传 `makepkg` 参数：`bash ./aur-fix-checksums-and-make.sh . --noconfirm`
+  - 强制自更新：`aur-fix-checksums-and-make --self-update`
+- 行为说明：
+  - 只要没有发现校验失败，就不会改写 `PKGBUILD`，并会先提示“无需修改”，再询问是否继续执行 `makepkg -si`。
+  - 发现失败时会先备份一份 `PKGBUILD.bak.<时间戳>`。
+  - 更新校验值后会再检查一次 source；若仍失败则停止，避免继续构建。
+  - 默认带 24 小时冷却的自动更新检查；更新检查失败时会自动跳过，不影响后续构建流程。
+  - 如果 `paru` 和 `yay` 的缓存目录同时存在，会按序号提示你选择使用哪个目录。
 
 ### `github-mirror-axel.sh`
 - 功能：对 `axel` 下载做镜像加速与重试，目标 URL 为 GitHub 域名时自动选镜像，配合 AUR 使用。
