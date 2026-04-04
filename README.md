@@ -13,6 +13,7 @@
 | `install-jdk-dragonwell.sh` | 交互式下载并安装 Dragonwell JDK | Debian/RedHat 系 | 会写 `/opt/java`、`/etc/profile` |
 | `install-launcherx-bin.sh` | 自动更新并构建 AUR `launcherx-bin` | Arch Linux | 会执行 `makepkg -si` 安装 |
 | `reset_screen.sh` | 关闭再重开指定显示器输出 | X11 + xrandr |  |
+| `synology-ignore-monitor.bat` | Windows 下监控并注入 Synology Drive 忽略规则 | Windows + Synology Drive Client + AlwaysUp | 建议作为 AlwaysUp 常驻任务运行；若脚本依赖 `%LOCALAPPDATA%` 等用户环境变量，需在 AlwaysUp 中填写用户和密码 |
 | `synology-ignore-monitor.sh` | 监控并注入 Synology Drive 忽略规则 | Linux + Synology Drive Client | 持续监控并修改配置文件 |
 | `update-github-hosts.sh` | 更新 GitHub hosts 并创建 cron 定时任务 | 通用 Linux | 必须 root，修改 `/etc/hosts`、`/etc/cron.d` |
 | `termius-update.sh` | 自动更新 AUR `termius` 的 PKGBUILD | Arch Linux | 进入临时 shell，用户手动构建 |
@@ -34,6 +35,10 @@ bash ./script-name.sh
 ```bash
 source ./github-wrappers.sh
 ```
+
+Windows 下的 `.bat` 常驻脚本统一建议通过 AlwaysUp 运行，不建议直接双击后挂在前台窗口。
+
+如果 `.bat` 脚本中使用了 `%LOCALAPPDATA%` 这类用户环境变量，必须在 AlwaysUp 的 `Logon` 页签中勾选“Instead of running the application in the Local System Account... run the application using this user”，并填写实际登录用户和密码；否则服务以 `Local System` 运行时，拿到的不是目标用户的目录。
 
 ## 脚本说明
 
@@ -103,6 +108,14 @@ source ./github-wrappers.sh
 - 功能：通过 `xrandr` 对显示器执行一次 `off -> on`，用于恢复唤醒异常或主屏错乱。
 - 当前默认输出口：`HDMI-0`。
 - 使用前建议先运行 `xrandr` 确认你的真实输出口名称，再改脚本中的接口名。
+
+### `synology-ignore-monitor.bat`
+- 功能：Windows 版 Synology Drive 忽略规则监控脚本，持续轮询 `%LOCALAPPDATA%\SynologyDrive\data\session` 下的 `blacklist.filter`，自动补写统一忽略规则。
+- 运行方式：建议在 AlwaysUp 中创建应用并长期运行该 `.bat`。
+- 注意事项：
+  - 本脚本依赖 `%LOCALAPPDATA%`，所以在 AlwaysUp 中不能使用默认的 `Local System Account`。
+  - 请在 AlwaysUp 的 `Logon` 页签中指定实际 Windows 登录用户，并保存对应密码，否则脚本可能找不到正确的 Synology Drive session 目录。
+  - 脚本会持续轮询并直接修改 Synology Drive 客户端配置文件。
 
 ### `synology-ignore-monitor.sh`
 - 功能：监控 `~/.SynologyDrive/data/session` 下的 `blacklist.filter`，自动注入统一忽略规则（如 `.git`、`node_modules`、`venv`、`dist` 等）。
