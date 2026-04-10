@@ -175,6 +175,22 @@ sed -i "s/^pkgver=.*/pkgver='${PKGVER}'/" PKGBUILD
 SOURCE_REPLACEMENT="    \"\${pkgname}-\${pkgver}.zip::${DOWNLOAD_URL}\""
 sed -i "s|^[[:space:]]*\"\\\${pkgname}-\\\${pkgver}\.zip::https://api\.corona\.studio/Build/get/[^/]\\+/[^\\\"]\\+\"|${SOURCE_REPLACEMENT}|" PKGBUILD
 
+# 修补 package() 中写死的可执行文件名，兼容旧包的 LauncherX.Avalonia 和新包的 LauncherX
+PACKAGE_INSTALL_LINE='    install -Dm755 "${srcdir}/LauncherX.Avalonia" "${pkgdir}/usr/bin/launcherx"'
+PACKAGE_INSTALL_REPLACEMENT='    local launcher_bin=""\
+    for candidate in LauncherX LauncherX.Avalonia; do\
+        if [ -f "${srcdir}/${candidate}" ]; then\
+            launcher_bin="${srcdir}/${candidate}"\
+            break\
+        fi\
+    done\
+    if [ -z "${launcher_bin}" ]; then\
+        echo "LauncherX binary not found in ${srcdir}" >\&2\
+        return 1\
+    fi\
+    install -Dm755 "${launcher_bin}" "${pkgdir}/usr/bin/launcherx"'
+sed -i "s|^${PACKAGE_INSTALL_LINE}$|${PACKAGE_INSTALL_REPLACEMENT}|" PKGBUILD
+
 echo -e "${BLUE}${L_CALC_SUMS}${NC}"
 updpkgsums
 
