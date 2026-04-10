@@ -10,6 +10,7 @@
 | `aur-fix-checksums-and-make.sh` | 遇到 source 校验失败时自动更新 `PKGBUILD` 校验值并继续构建 | Arch Linux / AUR 构建目录 | 会改写 `PKGBUILD` 并执行 `makepkg -si` |
 | `github-mirror-axel.sh` | 用镜像包装 `axel` 下载 GitHub 资源 | 通用 Linux | 会创建缓存文件、自我更新 |
 | `github-wrappers.sh` | 包装 `curl`/`wget`，自动改写 GitHub URL | 交互式 shell | 仅当前 shell 生效 |
+| `install-hmcl.sh` | 手动方式安装最新 HMCL 并创建桌面启动器 | Linux 桌面 | 会写 `~/.local/share/hmcl` 和 `.desktop` 文件 |
 | `install-jdk-dragonwell.sh` | 交互式下载并安装 Dragonwell JDK | Debian/RedHat 系 | 会写 `/opt/java`、`/etc/profile` |
 | `install-launcherx-bin.sh` | 自动更新并构建 AUR `launcherx-bin` | Arch Linux | 会执行 `makepkg -si` 安装 |
 | `reset_screen.sh` | 关闭再重开指定显示器输出 | X11 + xrandr |  |
@@ -86,6 +87,15 @@ Windows 下的 `.bat` 常驻脚本统一建议通过 AlwaysUp 运行，不建议
 - 注意事项：
   - 仅在脚本被 `source` 的 shell 中生效。
   - 通过 `command wget` / `command curl` 调原始命令，避免递归调用。
+
+### `install-hmcl.sh`
+- 功能：按手动安装思路自动获取 HMCL 最新 GitHub Release 的 jar，安装到 `~/.local/share/hmcl`，并创建 `hmcl.desktop`。
+- 关键流程：检查 `curl/jq/java` -> 查询 GitHub Releases 最新版本 -> 下载 jar 与图标 -> 写入桌面启动器。
+- 依赖：`curl`、`jq`、`java`。
+- 行为说明：
+  - jar 固定安装为 `~/.local/share/hmcl/HMCL.jar`，并额外写入 `~/.local/share/hmcl/VERSION` 用于版本判断。
+  - 启动参数默认带 `-Dglass.gtk.uiScale=1.5`，可通过环境变量 `HMCL_UI_SCALE` 覆盖。
+  - 若本地已是相同版本，交互式终端会询问是否强制重装；非交互式调用会直接退出。
 
 ### `install-jdk-dragonwell.sh`
 - 功能：从 Dragonwell 发布 JSON 中读取版本，交互式选择下载包并安装到 `/opt/java`。
