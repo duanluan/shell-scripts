@@ -13,6 +13,7 @@
 | `install-hmcl.sh` | 手动方式安装最新 HMCL 并创建桌面启动器 | Linux 桌面 | 会写 `~/.local/share/hmcl` 和 `.desktop` 文件 |
 | `install-jdk-dragonwell.sh` | 交互式下载并安装 Dragonwell JDK | Debian/RedHat 系 | 会写 `/opt/java`、`/etc/profile` |
 | `install-launcherx-bin.sh` | 自动更新并构建 AUR `launcherx-bin` | Arch Linux | 会执行 `makepkg -si` 安装 |
+| `prepare-jetbrains-zh-plugin.sh` | 自动为 JetBrains 系 IDE 准备可从磁盘安装的中文语言包 | Linux + JetBrains IDE 安装目录 | 会下载或重打包插件 jar 到本地 |
 | `reset_screen.sh` | 关闭再重开指定显示器输出 | X11 + xrandr |  |
 | `synology-ignore-monitor.bat` | Windows 下监控并注入 Synology Drive 忽略规则 | Windows + Synology Drive Client + AlwaysUp | 建议作为 AlwaysUp 常驻任务运行；若脚本依赖 `%LOCALAPPDATA%` 等用户环境变量，需在 AlwaysUp 中填写用户和密码 |
 | `synology-ignore-monitor.sh` | 监控并注入 Synology Drive 忽略规则 | Linux + Synology Drive Client | 持续监控并修改配置文件 |
@@ -113,6 +114,22 @@ Windows 下的 `.bat` 常驻脚本统一建议通过 AlwaysUp 运行，不建议
 - 关键流程：依赖检查 -> 克隆 AUR -> 调 Corona Studio API -> 更新 `pkgver/source` -> `updpkgsums` -> `makepkg -si`。
 - 依赖：`jq`、`curl`、`git`、`updpkgsums`（`pacman-contrib`）、`makepkg`（`base-devel`）、`sed`。
 - 适用环境：Arch Linux / Manjaro 等 `pacman` 生态。
+
+### `prepare-jetbrains-zh-plugin.sh`
+- 功能：自动发现本机 JetBrains IDE，自动查找中文语言包来源，并生成适配目标 IDE 的 `localization-zh.jar`。
+- 关键流程：自动扫描 `/opt/jetbrains`、Toolbox 目录、`PATH` 里的 JetBrains 启动命令 -> 自动定位 Android Studio 作为目标 IDE -> 中文包来源按 `--source` -> `--jb` -> Marketplace -> 本机其它 JetBrains IDE 自带 `plugins/localization-zh/lib/localization-zh.jar` 的顺序选择 -> 自动改写 `META-INF/plugin.xml` -> 重新打包为可从磁盘安装的 jar。
+- 默认行为：直接安装到当前用户的 Android Studio 插件目录；若设置了 `XDG_DATA_HOME` 则使用它，否则使用 `~/.local/share`。目录名优先取 IDE 实际 selector，其次回退到 `dataDirectoryName`，例如 `~/.local/share/Google/AndroidStudio2025.3.2/localization-zh.jar`。
+- `--output`：额外导出一份 jar 到指定路径。
+- 参数：
+  - `--jb <目录或启动命令路径>`：显式指定 JetBrains IDE 安装目录或启动命令路径，优先用它的 `localization-zh.jar` 作为中文包来源。
+  - `--as <目录或启动命令路径>`：显式指定 Android Studio 安装目录或启动命令路径。
+  - `--source <jar|zip>`：直接指定中文包，优先级高于 `--jb`。
+- 用法：
+  - 查看已发现 IDE：`bash ./prepare-jetbrains-zh-plugin.sh --list`
+  - 为自动发现到的 Android Studio 直接安装：`bash ./prepare-jetbrains-zh-plugin.sh`
+  - 指定 JB 与 Android Studio 路径：`bash ./prepare-jetbrains-zh-plugin.sh --jb /path/to/idea --as /path/to/studio`
+  - 指定源包并直接安装：`bash ./prepare-jetbrains-zh-plugin.sh --source ~/Downloads/localization-zh.jar --as /path/to/studio`
+  - 额外导出一份 jar：`bash ./prepare-jetbrains-zh-plugin.sh --jb /path/to/idea --as /path/to/studio --output ~/Downloads/localization-zh.jar`
 
 ### `reset_screen.sh`
 - 功能：通过 `xrandr` 对显示器执行一次 `off -> on`，用于恢复唤醒异常或主屏错乱。
