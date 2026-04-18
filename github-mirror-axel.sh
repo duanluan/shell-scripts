@@ -3,8 +3,8 @@
 # title:         github-mirror-axel.sh
 # description:   一个 axel 包装脚本，用于通过镜像加速 GitHub 下载
 # author:        duanluan<duanluan@outlook.com>
-# date:          2026-02-03
-# version:       v3.3
+# date:          2026-04-18
+# version:       v3.4
 # usage:         github-mirror-axel.sh <output_file> <url>
 #
 # description_zh:
@@ -14,6 +14,7 @@
 #   来加速下载。其他 URL 则保持不变。
 #
 # changelog:
+#   v3.4 (2026-04-18)：修复 axel 下载到 100% 后以 141(SIGPIPE) 退出时被误判失败的问题
 #   v3.3 (2026-02-03)：直连出现错误就不重试
 #   v3.2 (2026-01-04)：直连且出现 403/404 错误，直接终止，不再尝试镜像
 #   v3.0 (2025-12-30)：自我更新功能，运行 --self-update 即可通过镜像检测并更新脚本自身
@@ -62,6 +63,54 @@ get_file_size() {
     else
         stat -c %s "$1"
     fi
+}
+
+get_remote_file_size() {
+    local url="$1"
+    local size
+
+    if ! command -v curl >/dev/null 2>&1; then
+        return 1
+    fi
+
+    size=$(curl -fsSLI --connect-timeout 10 --max-time 30 "$url" 2>/dev/null \
+        | tr -d '\r' \
+        | awk 'BEGIN{IGNORECASE=1} /^HTTP\//{cl=""; next} /^Content-Length:/{cl=$2} END{if (cl ~ /^[0-9]+$/ && cl > 0) print cl}')
+
+    if [ -n "$size" ]; then
+        echo "$size"
+        return 0
+    fi
+
+    return 1
+}
+
+is_download_complete() {
+    local path="$1"
+    local url="$2"
+    local local_size
+    local remote_size
+
+    if [ ! -f "$path" ]; then
+        return 1
+    fi
+
+    local_size=$(get_file_size "$path")
+    if ! [[ "$local_size" =~ ^[0-9]+$ ]] || [ "$local_size" -le 0 ]; then
+        return 1
+    fi
+
+    remote_size=$(get_remote_file_size "$url" || true)
+    if [ -n "$remote_size" ] && [ "$local_size" -eq "$remote_size" ]; then
+        return 0
+    fi
+
+    # axel 正常完成后会移除 .st；141 是 SIGPIPE，常见于进度输出收尾阶段。
+    if [ ! -f "$path.st" ]; then
+        return 0
+    fi
+
+    return 1
 }
 
 # ===================================================
@@ -351,6 +400,11 @@ while [ $attempt -le $MAX_RETRIES ]; do
         rm -f "$OUTPUT_FILE" "$OUTPUT_FILE.st"
         ((attempt++))
     elif [ $exit_code -eq 0 ]; then
+        success=true
+        break
+    elif [ $exit_code -eq 141 ] && is_download_complete "$OUTPUT_FILE" "$url"; then
+        echo ""
+        echo "⚠️  axel 以 141(SIGPIPE) 退出，但文件已完整，按下载成功处理。"
         success=true
         break
     else
