@@ -11,6 +11,7 @@ OUTPUT_FILE=""
 TEMP_ROOT=""
 JB_PATH=""
 AS_PATH=""
+TARGET_PATH=""
 
 IDE_DIRS=()
 IDE_NAMES=()
@@ -46,20 +47,29 @@ trap cleanup EXIT
 usage() {
   cat <<'EOF'
 用法:
-  bash ./prepare-jetbrains-zh-plugin.sh [--list] [--jb <目录或启动命令路径>] [--as <目录或启动命令路径>] [--source <jar|zip>] [--output <jar>] [--keep-temp]
+  bash ./prepare-jetbrains-zh-plugin.sh [--list] [--jb <目录或启动命令路径或命令名>] [--ide <目录或启动命令路径或命令名>] [--as <目录或启动命令路径或命令名>] [--source <jar|zip>] [--output <jar>] [--keep-temp]
 
 示例:
   bash ./prepare-jetbrains-zh-plugin.sh --list
   bash ./prepare-jetbrains-zh-plugin.sh --as /opt/jetbrains/android-studio
+  bash ./prepare-jetbrains-zh-plugin.sh --ide rebased
   bash ./prepare-jetbrains-zh-plugin.sh --jb /opt/jetbrains/intellij-idea-ultimate --as /opt/jetbrains/android-studio
+  bash ./prepare-jetbrains-zh-plugin.sh --jb idea-community --ide rebased
   bash ./prepare-jetbrains-zh-plugin.sh --source ~/Downloads/localization-zh.jar --as /opt/jetbrains/android-studio
-  bash ./prepare-jetbrains-zh-plugin.sh --jb /opt/jetbrains/intellij-idea-ultimate --as /opt/jetbrains/android-studio --output ~/Downloads/localization-zh.jar
+  bash ./prepare-jetbrains-zh-plugin.sh --source ~/Downloads/localization-zh.jar --ide rebased
+  bash ./prepare-jetbrains-zh-plugin.sh --jb /opt/jetbrains/intellij-idea-ultimate --ide rebased --output ~/Downloads/localization-zh.jar
 EOF
 }
 
 die() {
   printf '%s\n' "$*" >&2
   exit 1
+}
+
+ensure_temp_root() {
+  if [ -z "$TEMP_ROOT" ]; then
+    TEMP_ROOT=$(mktemp -d)
+  fi
 }
 
 abs_path() {
@@ -123,8 +133,10 @@ extract_selector_from_vmoptions() {
 
 load_ide_metadata() {
   local ide_dir="$1"
-  local product_info_path="${ide_dir}/product-info.json"
-  local build_txt_path="${ide_dir}/build.txt"
+  local metadata_dir="$ide_dir"
+  local product_info_path="${metadata_dir}/product-info.json"
+  local build_txt_path="${metadata_dir}/build.txt"
+  local appimage_path=""
 
   LOADED_IDE_NAME=""
   LOADED_IDE_CODE=""
@@ -136,6 +148,32 @@ load_ide_metadata() {
   LOADED_IDE_DATA_DIR_NAME=""
   LOADED_IDE_VENDOR=""
   LOADED_IDE_SELECTOR=""
+
+  if [ ! -f "$product_info_path" ] && [ ! -f "$build_txt_path" ]; then
+    if [ -d "$ide_dir" ]; then
+      appimage_path=$(find_appimage_in_dir "$ide_dir" || true)
+    else
+      case "$ide_dir" in
+        *.AppImage)
+          appimage_path="$ide_dir"
+          ;;
+        *)
+          appimage_path=$(extract_appimage_path_from_launcher "$ide_dir" || true)
+          if [ -n "$appimage_path" ]; then
+            appimage_path=$(readlink -f "$appimage_path" 2>/dev/null || printf '%s\n' "$appimage_path")
+          fi
+          ;;
+      esac
+    fi
+
+    if [ -n "$appimage_path" ]; then
+      metadata_dir=$(extract_appimage_ide_dir "$appimage_path" || true)
+      if [ -n "$metadata_dir" ]; then
+        product_info_path="${metadata_dir}/product-info.json"
+        build_txt_path="${metadata_dir}/build.txt"
+      fi
+    fi
+  fi
 
   if [ -f "$product_info_path" ]; then
     LOADED_IDE_NAME=$(extract_json_string "$product_info_path" "name")
@@ -151,7 +189,7 @@ load_ide_metadata() {
 
       vmoptions_relative_path=$(extract_json_string "$product_info_path" "vmOptionsFilePath")
       if [ -n "$vmoptions_relative_path" ]; then
-        vmoptions_path="${ide_dir}/${vmoptions_relative_path}"
+        vmoptions_path="${metadata_dir}/${vmoptions_relative_path}"
         if [ -f "$vmoptions_path" ]; then
           LOADED_IDE_SELECTOR=$(extract_selector_from_vmoptions "$vmoptions_path" || true)
         fi
@@ -243,23 +281,9 @@ register_ide_dir() {
   IDE_SELECTORS+=("$LOADED_IDE_SELECTOR")
 }
 
-resolve_ide_dir_from_path() {
-  local input_path="$1"
-  local resolved_path=""
-  local current_dir=""
+find_ide_metadata_root() {
+  local current_dir="$1"
   local parent_dir=""
-
-  if [ ! -e "$input_path" ]; then
-    return 1
-  fi
-
-  resolved_path=$(readlink -f "$input_path" 2>/dev/null || printf '%s\n' "$input_path")
-
-  if [ -d "$resolved_path" ]; then
-    current_dir="$resolved_path"
-  else
-    current_dir=$(dirname "$resolved_path")
-  fi
 
   while [ -n "$current_dir" ] && [ "$current_dir" != "/" ]; do
     if [ -f "${current_dir}/product-info.json" ] || [ -f "${current_dir}/build.txt" ]; then
@@ -272,6 +296,124 @@ resolve_ide_dir_from_path() {
     fi
     current_dir="$parent_dir"
   done
+
+  return 1
+}
+
+extract_appimage_path_from_launcher() {
+  local launcher_path="$1"
+
+  [ -f "$launcher_path" ] || return 1
+
+  awk '
+    {
+      for (i = 1; i <= NF; i++) {
+        candidate = $i
+        gsub(/"/, "", candidate)
+        if (candidate ~ /^\/.*\.AppImage$/) {
+          print candidate
+          exit 0
+        }
+      }
+    }
+  ' "$launcher_path" | head -n 1
+}
+
+find_appimage_in_dir() {
+  local input_dir="$1"
+  local candidate=""
+
+  for candidate in "$input_dir"/*.AppImage "$input_dir"/*/*.AppImage; do
+    if [ -f "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+extract_appimage_ide_dir() {
+  local appimage_path="$1"
+  local safe_name=""
+  local extract_root=""
+  local ide_dir=""
+
+  [ -f "$appimage_path" ] || return 1
+
+  ensure_temp_root
+  safe_name=$(printf '%s\n' "$appimage_path" | tr -c '[:alnum:]._' '_')
+  extract_root="${TEMP_ROOT}/appimage-${safe_name}"
+  ide_dir="${extract_root}/squashfs-root/usr"
+
+  if [ ! -d "$ide_dir" ]; then
+    mkdir -p "$extract_root"
+    (
+      cd "$extract_root"
+      "$appimage_path" --appimage-extract "usr/product-info.json" >/dev/null 2>&1 || true
+      "$appimage_path" --appimage-extract "usr/build.txt" >/dev/null 2>&1 || true
+      "$appimage_path" --appimage-extract "usr/bin/*.vmoptions" >/dev/null 2>&1 || true
+    )
+  fi
+
+  if [ -f "${ide_dir}/product-info.json" ] || [ -f "${ide_dir}/build.txt" ]; then
+    printf '%s\n' "$ide_dir"
+    return 0
+  fi
+
+  return 1
+}
+
+resolve_ide_dir_from_path() {
+  local input_path="$1"
+  local resolved_path=""
+  local launcher_path=""
+  local appimage_path=""
+  local current_dir=""
+
+  if [ -e "$input_path" ]; then
+    resolved_path=$(readlink -f "$input_path" 2>/dev/null || printf '%s\n' "$input_path")
+  elif launcher_path=$(command -v "$input_path" 2>/dev/null); then
+    resolved_path=$(readlink -f "$launcher_path" 2>/dev/null || printf '%s\n' "$launcher_path")
+  else
+    return 1
+  fi
+
+  if [ -d "$resolved_path" ]; then
+    current_dir="$resolved_path"
+  else
+    current_dir=$(dirname "$resolved_path")
+  fi
+
+  if current_dir=$(find_ide_metadata_root "$current_dir" || true); then
+    if [ -n "$current_dir" ]; then
+      printf '%s\n' "$current_dir"
+      return 0
+    fi
+  fi
+
+  if [ -d "$resolved_path" ]; then
+    appimage_path=$(find_appimage_in_dir "$resolved_path" || true)
+    if [ -n "$appimage_path" ]; then
+      printf '%s\n' "$(dirname "$appimage_path")"
+      return 0
+    fi
+  else
+    case "$resolved_path" in
+      *.AppImage)
+        printf '%s\n' "$(dirname "$resolved_path")"
+        return 0
+        ;;
+      *)
+        appimage_path=$(extract_appimage_path_from_launcher "$resolved_path" || true)
+        if [ -n "$appimage_path" ]; then
+          appimage_path=$(readlink -f "$appimage_path" 2>/dev/null || printf '%s\n' "$appimage_path")
+          printf '%s\n' "$(dirname "$appimage_path")"
+          return 0
+        fi
+        ;;
+    esac
+  fi
 
   return 1
 }
@@ -301,6 +443,7 @@ discover_ides_from_launchers() {
   for launcher_name in \
     idea idea-ultimate idea-community \
     studio android-studio \
+    rebased \
     pycharm webstorm datagrip rustrover rider clion goland phpstorm dataspell aqua gateway; do
     if launcher_path=$(command -v "$launcher_name" 2>/dev/null); then
       ide_dir=$(resolve_ide_dir_from_path "$launcher_path" || true)
@@ -321,7 +464,7 @@ discover_ides() {
 
   discover_ides_from_launchers
 
-  for ide_dir in "$JB_PATH" "$AS_PATH"; do
+  for ide_dir in "$JB_PATH" "$AS_PATH" "$TARGET_PATH"; do
     if [ -z "$ide_dir" ]; then
       continue
     fi
@@ -335,6 +478,17 @@ discover_ides() {
 print_ide_list() {
   local i
   local has_plugin
+  local row_id=""
+  local row_name=""
+  local row_code=""
+  local row_build=""
+  local row_plugin=""
+  local row_dir=""
+  local id_width=2
+  local name_width=4
+  local code_width=4
+  local build_width=5
+  local plugin_width=6
 
   if [ "${#IDE_DIRS[@]}" -eq 0 ]; then
     printf '未找到 JetBrains IDE 安装目录。\n'
@@ -342,17 +496,59 @@ print_ide_list() {
   fi
 
   for i in "${!IDE_DIRS[@]}"; do
+    row_id="$((i + 1))"
+    row_name="${IDE_NAMES[$i]:--}"
+    row_code="${IDE_CODES[$i]:--}"
+    row_build="${IDE_COMPAT_BUILDS[$i]:--}"
+    row_plugin="no"
+
+    if [ -n "${IDE_PLUGIN_PATHS[$i]}" ]; then
+      row_plugin="yes"
+    fi
+
+    if [ "${#row_id}" -gt "$id_width" ]; then
+      id_width="${#row_id}"
+    fi
+    if [ "${#row_name}" -gt "$name_width" ]; then
+      name_width="${#row_name}"
+    fi
+    if [ "${#row_code}" -gt "$code_width" ]; then
+      code_width="${#row_code}"
+    fi
+    if [ "${#row_build}" -gt "$build_width" ]; then
+      build_width="${#row_build}"
+    fi
+    if [ "${#row_plugin}" -gt "$plugin_width" ]; then
+      plugin_width="${#row_plugin}"
+    fi
+  done
+
+  printf "%-${id_width}s  %-${name_width}s  %-${code_width}s  %-${build_width}s  %-${plugin_width}s  %s\n" \
+    "id" \
+    "name" \
+    "code" \
+    "build" \
+    "plugin" \
+    "dir"
+
+  for i in "${!IDE_DIRS[@]}"; do
+    row_id="$((i + 1))"
+    row_name="${IDE_NAMES[$i]:--}"
+    row_code="${IDE_CODES[$i]:--}"
+    row_build="${IDE_COMPAT_BUILDS[$i]:--}"
+    row_dir="${IDE_DIRS[$i]:--}"
     has_plugin="no"
     if [ -n "${IDE_PLUGIN_PATHS[$i]}" ]; then
       has_plugin="yes"
     fi
-    printf '%d\t%s\t%s\t%s\t%s\t%s\n' \
-      "$((i + 1))" \
-      "${IDE_NAMES[$i]}" \
-      "${IDE_CODES[$i]:--}" \
-      "${IDE_COMPAT_BUILDS[$i]}" \
+
+    printf "%-${id_width}s  %-${name_width}s  %-${code_width}s  %-${build_width}s  %-${plugin_width}s  %s\n" \
+      "$row_id" \
+      "$row_name" \
+      "$row_code" \
+      "$row_build" \
       "$has_plugin" \
-      "${IDE_DIRS[$i]}"
+      "$row_dir"
   done
 }
 
@@ -422,6 +618,29 @@ resolve_as_target_index() {
   fi
 
   die "检测到多个 Android Studio，请使用 --as 指定。"
+}
+
+resolve_target_index() {
+  local requested_path=""
+  local resolved_dir=""
+  local target_index=""
+
+  if [ -n "$TARGET_PATH" ]; then
+    requested_path="$TARGET_PATH"
+  elif [ -n "$AS_PATH" ]; then
+    requested_path="$AS_PATH"
+  fi
+
+  if [ -n "$requested_path" ]; then
+    resolved_dir=$(resolve_ide_dir_from_path "$requested_path" || true)
+    [ -n "$resolved_dir" ] || die "无法识别目标 IDE 目录: $requested_path"
+    target_index=$(find_index_by_dir "$resolved_dir" || true)
+    [ -n "$target_index" ] || die "未注册目标 IDE 目录: $resolved_dir"
+    printf '%s\n' "$target_index"
+    return 0
+  fi
+
+  resolve_as_target_index
 }
 
 resolve_jb_source_package() {
@@ -571,7 +790,7 @@ extract_source_package() {
   rm -rf "$extract_dir" "$plugin_dir"
   mkdir -p "$extract_dir" "$plugin_dir"
 
-  unzip -q "$source_path" -d "$extract_dir"
+  unzip -oq "$source_path" -d "$extract_dir"
 
   plugin_xml_path=$(rg --files "$extract_dir" | rg '/META-INF/plugin\.xml$' | head -n 1 || true)
   if [ -z "$plugin_xml_path" ]; then
@@ -714,6 +933,11 @@ parse_args() {
         JB_PATH="$2"
         shift 2
         ;;
+      --ide|--target)
+        [ "$#" -ge 2 ] || die "$1 需要参数"
+        TARGET_PATH="$2"
+        shift 2
+        ;;
       --as)
         [ "$#" -ge 2 ] || die "$1 需要参数"
         AS_PATH="$2"
@@ -754,14 +978,14 @@ main() {
     exit 0
   fi
 
-  target_index=$(resolve_as_target_index)
+  target_index=$(resolve_target_index)
   target_dir="${IDE_DIRS[$target_index]}"
   target_name="${IDE_NAMES[$target_index]}"
   target_code="${IDE_CODES[$target_index]}"
   target_build="${IDE_COMPAT_BUILDS[$target_index]}"
   target_branch="${IDE_BRANCHES[$target_index]}"
 
-  TEMP_ROOT=$(mktemp -d)
+  ensure_temp_root
   stage_dir="${TEMP_ROOT}/stage"
   mkdir -p "$stage_dir"
 
@@ -809,7 +1033,7 @@ main() {
 
   install_path=$(get_install_path "$target_index" || true)
   if [ -z "$install_path" ]; then
-    die "无法推断 Android Studio 插件目录。"
+    die "无法推断目标 IDE 插件目录。"
   fi
 
   if [ -n "$OUTPUT_FILE" ]; then
