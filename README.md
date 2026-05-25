@@ -13,6 +13,7 @@
 | `install-hmcl.sh` | 手动方式安装最新 HMCL 并创建桌面启动器 | Linux 桌面 | 会写 `~/.local/share/hmcl` 和 `.desktop` 文件 |
 | `install-jdk-dragonwell.sh` | 交互式下载并安装 Dragonwell JDK | Debian/RedHat 系 | 会写 `/opt/java`、`/etc/profile` |
 | `install-launcherx-bin.sh` | 自动更新并构建 AUR `launcherx-bin` | Arch Linux | 会执行 `makepkg -si` 安装 |
+| `navicat-manager.sh` | 管理 Navicat Linux 配置：备份、恢复、检查和 reset | Linux 桌面 + Navicat 16/17 | 会读写 `~/.config/navicat` 和对应 dconf 项，会创建缓存文件、自我更新 |
 | `prepare-jetbrains-zh-plugin.sh` | 自动为 JetBrains 系 IDE 准备可从磁盘安装的中文语言包 | Linux + JetBrains IDE 安装目录 | 会下载或重打包插件 jar 到本地 |
 | `reset_screen.sh` | 关闭再重开指定显示器输出 | X11 + xrandr |  |
 | `synology-ignore-monitor.bat` | Windows 下监控并注入 Synology Drive 忽略规则 | Windows + Synology Drive Client + AlwaysUp | 建议作为 AlwaysUp 常驻任务运行；若脚本依赖 `%LOCALAPPDATA%` 等用户环境变量，需在 AlwaysUp 中填写用户和密码 |
@@ -114,6 +115,56 @@ Windows 下的 `.bat` 常驻脚本统一建议通过 AlwaysUp 运行，不建议
 - 关键流程：依赖检查 -> 克隆 AUR -> 调 Corona Studio API -> 更新 `pkgver/source` -> `updpkgsums` -> `makepkg -si`。
 - 依赖：`jq`、`curl`、`git`、`updpkgsums`（`pacman-contrib`）、`makepkg`（`base-devel`）、`sed`。
 - 适用环境：Arch Linux / Manjaro 等 `pacman` 生态。
+
+### `navicat-manager.sh`
+- 功能：管理 Navicat Linux 本地配置，支持 `backup`、`restore`、`inspect`、`reset` 和 `--self-update`。
+- 适配格式：
+  - `Common/connections.json` 中的 `Users[].Projects[].Servers[]`、旧版 `Connections[]` / `connections[]`。
+  - `Common/ui_connections.json` 中的 UI 连接记录。
+  - `Premium/preferences.json` 中的 `CloudSessions*`、`Clouds`、`Recents*`、`Continues*`、`AutoSaves*`。
+- 默认路径：
+  - 配置目录：`~/.config/navicat`
+  - 产品目录：`~/.config/navicat/Premium`
+  - 备份目录：`~/navicat-backups/backup-<timestamp>`
+  - dconf 路径：`/com/premiumsoft/navicat-premium/`
+- 备份内容：
+  - `~/.config/navicat/Common/connections.json`
+  - `~/.config/navicat/Common/ui_connections.json`
+  - `~/.config/navicat/Common/system_wide_preferences.json`
+  - `~/.config/navicat/Premium/preferences.json`
+  - `~/.config/navicat/Premium/ui_preferences.json`
+  - `dconf dump /com/premiumsoft/navicat-premium/` 的输出
+- 用法：
+  - 查看帮助：`bash ./navicat-manager.sh -h`
+  - 检查当前配置：`bash ./navicat-manager.sh inspect`
+  - 创建完整备份：`bash ./navicat-manager.sh backup`
+  - 从备份恢复：`bash ./navicat-manager.sh restore ~/navicat-backups/backup-20260525-164822 --kill`
+  - reset 并保留连接、UI 设置和云账号会话：`bash ./navicat-manager.sh reset`
+  - 只预览操作：`bash ./navicat-manager.sh restore <backup-dir> --dry-run`
+  - 强制自更新：`bash ./navicat-manager.sh --self-update`
+- 常用选项：
+  - `--config-dir <dir>`：指定 Navicat 配置目录，默认 `~/.config/navicat`。
+  - `--backup-root <dir>`：指定备份根目录，默认 `~/navicat-backups`。
+  - `--product <name>`：指定产品目录名，默认 `Premium`。
+  - `--kill`：执行动作前关闭 `navicat` / `Navicat` 进程。
+  - `--yes`：跳过确认提示。
+  - `--dry-run`：只显示将要执行的操作，不修改文件。
+  - `--self-update`：从远端更新脚本本身后退出。
+- `reset` 流程：
+  - 先保存当前 `Common` 和 `Premium` 配置。
+  - 重置当前产品对应的 dconf 路径。
+  - 删除 `preferences.json` 和 `preferences.json.lock`。
+  - 提示启动 Navicat，并等待新的 `preferences.json` 生成。
+  - 检测到新配置后询问是否自动关闭 Navicat，默认不关闭。
+  - Navicat 退出后恢复连接、UI 设置和云账号会话字段。
+- 注意事项：
+  - 依赖 `jq`；自更新需要 `curl`；有 `dconf` 时会读写对应 dconf 项。
+  - 脚本内置中英文提示，会根据 `LANG` 自动切换，单文件下载后即可运行。
+  - 执行动作前会做一次 24 小时冷却的自动更新检查，缓存文件为 `~/.cache/navicat-manager.last_check`；可用 `NAVICAT_MANAGER_UPDATE_URL` 覆盖更新源。
+  - `restore` 会先自动创建一份安全备份，再写入目标配置。
+  - 恢复 `preferences.json` 时只合并可迁移字段，不覆盖新生成配置里的其它字段。
+  - `reset` 过程中，看到“请启动 Navicat”就启动；询问“是否自动关闭 Navicat”时可按需选择。若界面已关闭但仍提示运行中，可重新执行 `bash ./navicat-manager.sh reset --kill`。
+  - 云账号会话过期时仍需要在 Navicat 内重新登录，脚本只能保留本地已有会话和连接数据。
 
 ### `prepare-jetbrains-zh-plugin.sh`
 - 功能：自动发现本机 JetBrains IDE，自动查找中文语言包来源，并生成适配目标 IDE 的 `localization-zh.jar`。
