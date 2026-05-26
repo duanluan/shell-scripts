@@ -168,19 +168,23 @@ Windows 下的 `.bat` 常驻脚本统一建议通过 AlwaysUp 运行，不建议
 
 ### `prepare-jetbrains-zh-plugin.sh`
 - 功能：自动发现本机 JetBrains IDE，自动查找中文语言包来源，并生成适配目标 IDE 的 `localization-zh.jar`。
-- 关键流程：自动扫描 `/opt/jetbrains`、Toolbox 目录、`PATH` 里的 JetBrains 启动命令 -> 自动定位 Android Studio 作为目标 IDE -> 中文包来源按 `--source` -> `--jb` -> Marketplace -> 本机其它 JetBrains IDE 自带 `plugins/localization-zh/lib/localization-zh.jar` 的顺序选择 -> 自动改写 `META-INF/plugin.xml` -> 重新打包为可从磁盘安装的 jar。
-- 默认行为：直接安装到当前用户的 Android Studio 插件目录；若设置了 `XDG_DATA_HOME` 则使用它，否则使用 `~/.local/share`。目录名优先取 IDE 实际 selector，其次回退到 `dataDirectoryName`，例如 `~/.local/share/Google/AndroidStudio2025.3.2/localization-zh.jar`。
-- `--output`：额外导出一份 jar 到指定路径。
+- 关键流程：自动扫描 `/opt/jetbrains`、Toolbox 目录、`PATH` 里的 JetBrains 启动命令（含 `rebased`）-> 默认自动定位 Android Studio，或用 `--ide`/`--as` 显式指定目标 IDE -> 中文包来源按 `--source` -> `--jb` -> Marketplace -> 本机其它 JetBrains IDE 自带 `plugins/localization-zh/lib/localization-zh.jar` 的顺序选择 -> 自动改写 `META-INF/plugin.xml` -> 重新打包为可从磁盘安装的 jar。
+- 默认行为：未指定目标时，安装到当前用户的 Android Studio 插件数据目录；若设置了 `XDG_DATA_HOME` 则使用它，否则使用 `~/.local/share`。目录名优先取 IDE 实际 selector，其次回退到 `dataDirectoryName`。例如 Android Studio 写到 `~/.local/share/Google/AndroidStudio2025.3.2/localization-zh.jar`，`rebased` 写到 `~/.local/share/JetBrains/IdeaIC1.0/localization-zh.jar`。
+- `--output`：额外导出一份 jar 到指定路径，同时仍会安装到目标 IDE 的插件数据目录。
 - 参数：
-  - `--jb <目录或启动命令路径>`：显式指定 JetBrains IDE 安装目录或启动命令路径，优先用它的 `localization-zh.jar` 作为中文包来源。
-  - `--as <目录或启动命令路径>`：显式指定 Android Studio 安装目录或启动命令路径。
+  - `--jb <目录或启动命令路径或命令名>`：显式指定 JetBrains IDE 安装目录、启动命令路径或命令名，优先用它的 `localization-zh.jar` 作为中文包来源。
+  - `--ide <目录或启动命令路径或命令名>` / `--target <目录或启动命令路径或命令名>`：显式指定目标 IDE，适合 `rebased`、IDEA 等非 Android Studio 目标。
+  - `--as <目录或启动命令路径或命令名>`：显式指定 Android Studio 安装目录、启动命令路径或命令名，兼容旧用法。
   - `--source <jar|zip>`：直接指定中文包，优先级高于 `--jb`。
 - 用法：
   - 查看已发现 IDE：`bash ./prepare-jetbrains-zh-plugin.sh --list`
   - 为自动发现到的 Android Studio 直接安装：`bash ./prepare-jetbrains-zh-plugin.sh`
+  - 为 `rebased` 直接安装：`bash ./prepare-jetbrains-zh-plugin.sh --ide rebased`
   - 指定 JB 与 Android Studio 路径：`bash ./prepare-jetbrains-zh-plugin.sh --jb /path/to/idea --as /path/to/studio`
+  - 指定 JB 与 `rebased` 路径：`bash ./prepare-jetbrains-zh-plugin.sh --jb /path/to/idea --ide rebased`
   - 指定源包并直接安装：`bash ./prepare-jetbrains-zh-plugin.sh --source ~/Downloads/localization-zh.jar --as /path/to/studio`
-  - 额外导出一份 jar：`bash ./prepare-jetbrains-zh-plugin.sh --jb /path/to/idea --as /path/to/studio --output ~/Downloads/localization-zh.jar`
+  - 给 `rebased` 指定源包：`bash ./prepare-jetbrains-zh-plugin.sh --source ~/Downloads/localization-zh.jar --ide rebased`
+  - 额外导出一份 jar：`bash ./prepare-jetbrains-zh-plugin.sh --jb /path/to/idea --ide rebased --output ~/Downloads/localization-zh.jar`
 
 ### `reset_screen.sh`
 - 功能：通过 `xrandr` 对显示器执行一次 `off -> on`，用于恢复唤醒异常或主屏错乱。
