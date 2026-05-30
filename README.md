@@ -188,8 +188,8 @@ Windows 下的 `.bat` 常驻脚本统一建议通过 AlwaysUp 运行，不建议
 
 ### `reset_screen.sh`
 - 功能：通过 `xrandr` 对显示器执行一次 `off -> on`，用于恢复唤醒异常或主屏错乱。
-- 当前默认输出口：`HDMI-0`。
-- 使用前建议先运行 `xrandr` 确认你的真实输出口名称，再改脚本中的接口名。
+- 默认自动选择已连接输出口，优先当前主屏和已启用输出，兼容 NVIDIA 常见的 `HDMI-0` 与 AMD/迷你主机常见的 `HDMI-A-0`。
+- 可通过第一个参数或 `RESET_SCREEN_OUTPUT` 指定输出口：`./reset_screen.sh HDMI-0`、`RESET_SCREEN_OUTPUT=HDMI-A-0 ./reset_screen.sh`。
 
 ### `synology-ignore-monitor.bat`
 - 功能：Windows 版 Synology Drive 忽略规则监控脚本，持续轮询 `%LOCALAPPDATA%\SynologyDrive\data\session` 下的 `blacklist.filter`，自动补写统一忽略规则。
