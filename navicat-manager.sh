@@ -4,7 +4,7 @@
 # description:   备份、恢复和检查 Navicat Linux 连接、UI 设置与云账号会话
 # author:        duanluan<duanluan@outlook.com>
 # date:          2026-05-25
-# version:       v1.0
+# version:       v1.1
 # usage:         navicat-manager.sh [backup|restore|inspect|reset] [options]
 #
 # description_zh:
@@ -12,6 +12,7 @@
 #   reset 时会保留 Common 连接文件、产品 UI 设置，以及 preferences.json 中可迁移的云账号会话字段。
 #
 # changelog:
+#   v1.1 (2026-06-23)：更新脚本后自动继续执行原命令
 #   v1.0 (2026-05-25)：支持连接/UI/云账号会话备份恢复、reset 保留配置、自动关闭 Navicat、中英提示和自更新
 #===============================================================
 
@@ -135,6 +136,8 @@ L_SELF_UPDATE_CURRENT_VERSION="Local version: %s"
 L_SELF_UPDATE_NEW_VERSION="New version found: %s (current: %s)"
 L_SELF_UPDATE_INSTALLING="Updating script..."
 L_SELF_UPDATE_DONE="Update finished. Rerun the script."
+L_SELF_UPDATE_CONTINUING="Update finished. Continuing with the requested action..."
+L_SELF_UPDATE_RESTART_FAILED="Could not restart updated script: %s"
 L_SELF_UPDATE_LATEST="Already up to date (%s)."
 L_SELF_UPDATE_SKIP_NO_CURL="Skipping update check: curl is not installed."
 L_SELF_UPDATE_SKIP_NO_VERSION="Skipping update check: local version was not found."
@@ -234,6 +237,8 @@ if [[ "${LANG:-}" == *"zh_"* ]]; then
   L_SELF_UPDATE_NEW_VERSION="发现新版本: %s（当前: %s）"
   L_SELF_UPDATE_INSTALLING="正在更新脚本..."
   L_SELF_UPDATE_DONE="更新完成，请重新运行脚本。"
+  L_SELF_UPDATE_CONTINUING="更新完成，继续执行当前操作..."
+  L_SELF_UPDATE_RESTART_FAILED="无法重新启动更新后的脚本: %s"
   L_SELF_UPDATE_LATEST="当前已是最新版本（%s）。"
   L_SELF_UPDATE_SKIP_NO_CURL="跳过更新检查：未安装 curl。"
   L_SELF_UPDATE_SKIP_NO_VERSION="跳过更新检查：未找到本地版本号。"
@@ -434,6 +439,7 @@ version_gt() {
 
 check_self_update() {
   local force_check=$1
+  shift
   local current_time last_check elapsed current_ver remote_ver tmp_script
 
   current_time=$(date +%s)
@@ -492,8 +498,13 @@ check_self_update() {
     cp "$tmp_script" "$SCRIPT_PATH"
     chmod +x "$SCRIPT_PATH"
     rm -f "$tmp_script"
-    log "$L_SELF_UPDATE_DONE"
-    exit 0
+    if [[ "$force_check" == "true" ]]; then
+      log "$L_SELF_UPDATE_DONE"
+      exit 0
+    fi
+    log "$L_SELF_UPDATE_CONTINUING"
+    NAVICAT_MANAGER_SKIP_SELF_UPDATE=1 exec "$SCRIPT_PATH" "$@"
+    die "$(fmt "$L_SELF_UPDATE_RESTART_FAILED" "$SCRIPT_PATH")"
   fi
 
   rm -f "$tmp_script"
@@ -931,8 +942,8 @@ main() {
     exit 0
   fi
 
-  if [[ -n "$ACTION" && "$DRY_RUN" -eq 0 ]]; then
-    check_self_update "false"
+  if [[ -n "$ACTION" && "$DRY_RUN" -eq 0 && "${NAVICAT_MANAGER_SKIP_SELF_UPDATE:-0}" != "1" ]]; then
+    check_self_update "false" "$@"
   fi
 
   case "$ACTION" in
