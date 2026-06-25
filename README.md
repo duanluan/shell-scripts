@@ -8,6 +8,8 @@
 | --- | --- | --- | --- |
 | `activate-wechat.sh` | 激活托盘微信窗口（X11/Wayland） | Linux 桌面 | 可能自动安装依赖 |
 | `aur-fix-checksums-and-make.sh` | 遇到 source 校验失败时自动更新 `PKGBUILD` 校验值并继续构建 | Arch Linux / AUR 构建目录 | 会改写 `PKGBUILD` 并执行 `makepkg -si` |
+| `codex-headroom-port-monitor.ps1` | Windows 下监控 Codex 配置并恢复 Headroom 供应商配置 | Windows + Codex + Headroom | 持续监控并修改 `%USERPROFILE%\.codex\config.toml` |
+| `codex-headroom-port-monitor.sh` | 监控 Codex 配置并恢复 Headroom 供应商配置 | Linux + Codex + Headroom | 持续监控并修改 `~/.codex/config.toml` |
 | `github-mirror-axel.sh` | 用镜像包装 `axel` 下载 GitHub 资源 | 通用 Linux | 会创建缓存文件、自我更新 |
 | `github-wrappers.sh` | 包装 `curl`/`wget`，自动改写 GitHub URL | 交互式 shell | 仅当前 shell 生效 |
 | `install-hmcl.sh` | 手动方式安装最新 HMCL 并创建桌面启动器 | Linux 桌面 | 会写 `~/.local/share/hmcl` 和 `.desktop` 文件 |
@@ -39,7 +41,7 @@ bash ./script-name.sh
 source ./github-wrappers.sh
 ```
 
-Windows 下的 `.bat` 常驻脚本统一建议通过 AlwaysUp 运行，不建议直接双击后挂在前台窗口。
+Windows 下的 `.bat` 常驻脚本统一建议通过 AlwaysUp 运行，不建议直接双击后挂在前台窗口。`.ps1` 常驻脚本优先建议通过计划任务运行。
 
 如果 `.bat` 脚本中使用了 `%LOCALAPPDATA%` 这类用户环境变量，必须在 AlwaysUp 的 `Logon` 页签中勾选“Instead of running the application in the Local System Account... run the application using this user”，并填写实际登录用户和密码；否则服务以 `Local System` 运行时，拿到的不是目标用户的目录。
 
@@ -70,6 +72,106 @@ Windows 下的 `.bat` 常驻脚本统一建议通过 AlwaysUp 运行，不建议
   - 更新校验值后会再检查一次 source；若仍失败则停止，避免继续构建。
   - 默认带 24 小时冷却的自动更新检查；更新检查失败时会自动跳过，不影响后续构建流程。
   - 如果 `paru` 和 `yay` 的缓存目录同时存在，会按序号提示你选择使用哪个目录。
+
+### `codex-headroom-port-monitor.sh` / `codex-headroom-port-monitor.ps1`
+- 功能：监控 Codex 配置文件，当 CC Switch 等工具改写 Codex 配置并删除 Headroom 注入内容时，自动恢复 Headroom 供应商配置。
+- 默认行为：
+  - Linux/Mac 配置文件：`~/.codex/config.toml`
+  - Windows 配置文件：`%USERPROFILE%\.codex\config.toml`
+  - Linux/Mac Headroom 部署清单：`~/.headroom/deploy/default/manifest.json`
+  - Windows Headroom 部署清单：`%USERPROFILE%\.headroom\deploy\default\manifest.json`
+  - 端口来源：优先使用环境变量 `HEADROOM_PORT`，其次读取 manifest，最后默认 `15721`
+  - 将 `model_provider` 设为 `headroom`
+  - 恢复顶部 `openai_base_url`、`[model_providers.headroom]` 和 `[mcp_servers.headroom]`
+  - 不改写 `[model_providers.custom]`，因此 CC Switch 的本地路由地址可以继续保留为 `15722`
+- Linux/Mac 用法：
+  - 单次修正：`bash ./codex-headroom-port-monitor.sh --once`
+  - 常驻监控：`bash ./codex-headroom-port-monitor.sh`
+  - 自定义端口：`HEADROOM_PORT=15721 bash ./codex-headroom-port-monitor.sh`
+  - 自定义轮询间隔：`POLL_INTERVAL=2 bash ./codex-headroom-port-monitor.sh`
+- Linux/Mac 新电脑安装：
+
+```bash
+mkdir -p ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/duanluan/shell-scripts/main/codex-headroom-port-monitor.sh -o ~/.local/bin/codex-headroom-port-monitor
+chmod +x ~/.local/bin/codex-headroom-port-monitor
+
+~/.local/bin/codex-headroom-port-monitor --once
+~/.local/bin/codex-headroom-port-monitor
+```
+
+- Linux systemd 用户服务：
+
+```bash
+mkdir -p ~/.config/systemd/user
+
+cat > ~/.config/systemd/user/codex-headroom-port-monitor.service <<'EOF'
+[Unit]
+Description=Codex Headroom Config Monitor
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash %h/.local/bin/codex-headroom-port-monitor
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+EOF
+
+systemctl --user daemon-reload
+systemctl --user enable --now codex-headroom-port-monitor.service
+systemctl --user status codex-headroom-port-monitor.service
+```
+
+- Windows PowerShell 用法：
+  - 单次修正：`powershell -NoProfile -ExecutionPolicy Bypass -File .\codex-headroom-port-monitor.ps1 -Once`
+  - 常驻监控：`powershell -NoProfile -ExecutionPolicy Bypass -File .\codex-headroom-port-monitor.ps1`
+  - 自定义端口：`$env:HEADROOM_PORT="15721"; powershell -NoProfile -ExecutionPolicy Bypass -File .\codex-headroom-port-monitor.ps1`
+  - 自定义轮询间隔：`$env:POLL_INTERVAL="2"; powershell -NoProfile -ExecutionPolicy Bypass -File .\codex-headroom-port-monitor.ps1`
+
+- Windows 新电脑安装：
+
+```powershell
+New-Item -ItemType Directory -Force "$HOME\.local\bin" | Out-Null
+Invoke-WebRequest `
+  -Uri "https://raw.githubusercontent.com/duanluan/shell-scripts/main/codex-headroom-port-monitor.ps1" `
+  -OutFile "$HOME\.local\bin\codex-headroom-port-monitor.ps1"
+
+powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.local\bin\codex-headroom-port-monitor.ps1" -Once
+powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.local\bin\codex-headroom-port-monitor.ps1"
+```
+
+- Windows 计划任务自启动：
+
+```powershell
+$Script = "$HOME\.local\bin\codex-headroom-port-monitor.ps1"
+$Action = New-ScheduledTaskAction `
+  -Execute "powershell.exe" `
+  -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$Script`""
+$Trigger = New-ScheduledTaskTrigger -AtLogOn
+$Settings = New-ScheduledTaskSettingsSet `
+  -AllowStartIfOnBatteries `
+  -DontStopIfGoingOnBatteries `
+  -RestartCount 999 `
+  -RestartInterval (New-TimeSpan -Minutes 1)
+
+Register-ScheduledTask `
+  -TaskName "Codex Headroom Port Monitor" `
+  -Action $Action `
+  -Trigger $Trigger `
+  -Settings $Settings `
+  -Description "Monitor Codex config and restore Headroom provider." `
+  -Force
+
+Start-ScheduledTask -TaskName "Codex Headroom Port Monitor"
+Get-ScheduledTask -TaskName "Codex Headroom Port Monitor"
+```
+
+- 依赖：
+  - Linux/Mac 优先使用 `inotifywait` 监听文件变化；缺失时自动使用轮询模式。
+  - Windows 优先使用 `FileSystemWatcher` 监听文件变化；异常时自动使用轮询模式。
 
 ### `github-mirror-axel.sh`
 - 功能：对 `axel` 下载做镜像加速与重试，目标 URL 为 GitHub 域名时自动选镜像，配合 AUR 使用。
