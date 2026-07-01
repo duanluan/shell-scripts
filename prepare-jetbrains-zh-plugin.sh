@@ -826,18 +826,25 @@ pack_plugin_dir() {
   local output_path="$2"
   local output_dir
   local temp_path
+  local entry_list
 
   output_dir=$(dirname "$output_path")
   temp_path="${output_path}.tmp.$$"
+  entry_list="${output_path}.entries.$$"
 
   mkdir -p "$output_dir"
+  find "$plugin_dir" -type d -exec chmod 755 {} +
+  find "$plugin_dir" -type f -exec chmod 644 {} +
+  TZ=UTC find "$plugin_dir" -exec touch -h -t 200001010000.00 {} +
+  rm -f "$temp_path" "$entry_list"
 
   (
     cd "$plugin_dir"
-    rm -f "$temp_path"
-    zip -qr "$temp_path" .
+    find . -type f -print | sed 's#^\./##' | LC_ALL=C sort > "$entry_list"
+    TZ=UTC zip -q -X "$temp_path" -@ < "$entry_list"
   )
 
+  rm -f "$entry_list"
   mv -f "$temp_path" "$output_path"
 }
 
@@ -846,28 +853,34 @@ get_install_path() {
   local selector_name="${IDE_SELECTORS[$target_index]}"
   local vendor_name="${IDE_VENDORS[$target_index]}"
   local base_dir=""
+  local vendor_dir=""
 
   if [ -z "$selector_name" ]; then
     return 1
   fi
 
   case "$vendor_name" in
-    Google)
-      base_dir="${XDG_DATA_HOME:-${HOME}/.local/share}/Google"
-      ;;
-    JetBrains)
-      base_dir="${XDG_DATA_HOME:-${HOME}/.local/share}/JetBrains"
-      ;;
-    *)
+  Google)
+    base_dir="${XDG_DATA_HOME:-${HOME}/.local/share}/Google"
+    ;;
+  JetBrains)
+    base_dir="${XDG_DATA_HOME:-${HOME}/.local/share}/JetBrains"
+    ;;
+  *)
+    if [ -n "$vendor_name" ]; then
+      vendor_dir=$(printf '%s\n' "$vendor_name" | tr '[:upper:]' '[:lower:]')
+      base_dir="${XDG_DATA_HOME:-${HOME}/.local/share}/${vendor_dir}"
+    else
       case "${IDE_DIRS[$target_index]}" in
-        */android-studio*)
-          base_dir="${XDG_DATA_HOME:-${HOME}/.local/share}/Google"
-          ;;
-        *)
-          base_dir="${XDG_DATA_HOME:-${HOME}/.local/share}/JetBrains"
-          ;;
+      */android-studio*)
+        base_dir="${XDG_DATA_HOME:-${HOME}/.local/share}/Google"
+        ;;
+      *)
+        base_dir="${XDG_DATA_HOME:-${HOME}/.local/share}/JetBrains"
+        ;;
       esac
-      ;;
+    fi
+    ;;
   esac
 
   printf '%s/%s/localization-zh.jar\n' "$base_dir" "$selector_name"
@@ -892,7 +905,7 @@ check_dependencies() {
   local missing=()
   local command_name
 
-  for command_name in awk basename cp dirname head mktemp perl readlink rg sed tr unzip zip; do
+  for command_name in awk basename chmod cp dirname find head mktemp perl readlink rg sed sort touch tr unzip zip; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
       missing+=("$command_name")
     fi
