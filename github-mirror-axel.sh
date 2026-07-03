@@ -3,8 +3,8 @@
 # title:         github-mirror-axel.sh
 # description:   一个 axel 包装脚本，用于通过镜像加速 GitHub 下载
 # author:        duanluan<duanluan@outlook.com>
-# date:          2026-04-18
-# version:       v3.4
+# date:          2026-07-03
+# version:       v3.5
 # usage:         github-mirror-axel.sh <output_file> <url>
 #
 # description_zh:
@@ -14,6 +14,7 @@
 #   来加速下载。其他 URL 则保持不变。
 #
 # changelog:
+#   v3.5 (2026-07-03)：commit patch 直接使用原始 GitHub 地址；镜像全部失败后再尝试原始地址
 #   v3.4 (2026-04-18)：修复 axel 下载到 100% 后以 141(SIGPIPE) 退出时被误判失败的问题
 #   v3.3 (2026-02-03)：直连出现错误就不重试
 #   v3.2 (2026-01-04)：直连且出现 403/404 错误，直接终止，不再尝试镜像
@@ -249,31 +250,54 @@ fi
 attempt=0
 success=false
 last_index=-1  # 用于记录上一次使用的代理索引，防止重试时重复
+used_proxy_indexes=""
+used_proxy_count=0
+domin=$(echo "$ORIGINAL_URL" | cut -f3 -d'/')
+is_github_url=false
+direct_github_patch=false
+max_attempt=$MAX_RETRIES
 
-while [ $attempt -le $MAX_RETRIES ]; do
+if [[ "$domin" == *"github.com"* ]] || [[ "$domin" == "raw.githubusercontent.com" ]]; then
+    is_github_url=true
+fi
+
+if [[ "$domin" == "github.com" ]] && [[ "$ORIGINAL_URL" == */commit/*.patch* ]]; then
+    direct_github_patch=true
+    max_attempt=0
+elif [ "$is_github_url" = true ] && [ ${#proxies[@]} -gt 0 ]; then
+    max_attempt=$((MAX_RETRIES + 1))
+else
+    max_attempt=0
+fi
+
+while [ $attempt -le $max_attempt ]; do
 
     # -----------------------------------------------
     # 1. 代理选择逻辑 (含去重)
     # -----------------------------------------------
     num_proxies=${#proxies[@]}
     selected_entry=""
+    use_direct_fallback=false
 
-    # 解析域名
-    domin=$(echo "$ORIGINAL_URL" | cut -f3 -d'/')
+    if [ "$is_github_url" = true ] && [ "$direct_github_patch" = false ] && ([ $attempt -gt $MAX_RETRIES ] || [ "$used_proxy_count" -ge "$num_proxies" ]); then
+        use_direct_fallback=true
+    fi
 
     # 仅针对 github.com 和 raw.githubusercontent.com 启用代理逻辑
-    if ([[ "$domin" == *"github.com"* ]] || [[ "$domin" == "raw.githubusercontent.com" ]]) && [ "$num_proxies" -gt 0 ]; then
+    if [ "$is_github_url" = true ] && [ "$direct_github_patch" = false ] && [ "$use_direct_fallback" = false ] && [ "$num_proxies" -gt 0 ]; then
         # 生成随机索引
         random_index=$(($RANDOM % $num_proxies))
 
         # [逻辑优化] 如果代理多于1个，且随机到了上次失败的同一个，就强制重选
         if [ "$num_proxies" -gt 1 ]; then
-            while [ "$random_index" -eq "$last_index" ]; do
+            while [[ " $used_proxy_indexes " == *" $random_index "* ]]; do
                 random_index=$(($RANDOM % $num_proxies))
             done
         fi
 
         last_index=$random_index
+        used_proxy_indexes="$used_proxy_indexes $random_index"
+        used_proxy_count=$((used_proxy_count + 1))
         selected_entry="${proxies[$random_index]}"
     fi
 
@@ -291,6 +315,12 @@ while [ $attempt -le $MAX_RETRIES ]; do
     url="$ORIGINAL_URL"
     proxy_info="直连"
 
+    if [ "$direct_github_patch" = true ]; then
+        proxy_info="原始 GitHub 地址（commit patch）"
+    elif [ "$use_direct_fallback" = true ]; then
+        proxy_info="原始 GitHub 地址"
+    fi
+
     if [ -n "$proxy_type" ]; then
         if [ "$proxy_type" = "prefix" ]; then
             url="${proxy_url}${ORIGINAL_URL}"
@@ -307,7 +337,7 @@ while [ $attempt -le $MAX_RETRIES ]; do
     # -----------------------------------------------
     # 判定是否为最后一次尝试
     is_last_attempt=false
-    if [ $attempt -eq $MAX_RETRIES ]; then
+    if [ $attempt -eq $max_attempt ]; then
         is_last_attempt=true
     fi
 
