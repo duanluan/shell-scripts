@@ -26,8 +26,31 @@ fi
 DPI_OVERRIDE="${RESET_SCREEN_DPI:-}"
 
 has_command() {
-    command -v "$1" >/dev/null 2>&1
+  command -v "$1" >/dev/null 2>&1
 }
+
+acquire_run_lock() {
+  local lock_base lock_path
+
+  # 避免连续快捷键触发时，后一个进程把临时分辨率当作正常分辨率保存。
+  lock_base="${XDG_RUNTIME_DIR:-/tmp}"
+  if [[ ! -d "$lock_base" || ! -w "$lock_base" ]]; then
+    lock_base="/tmp"
+  fi
+
+  if has_command flock; then
+    lock_path="${lock_base}/reset_screen.$(id -u).lock"
+    exec 9>"$lock_path"
+    flock -n 9 || exit 0
+    return
+  fi
+
+  lock_path="${lock_base}/reset_screen.$(id -u).lockdir"
+  mkdir "$lock_path" 2>/dev/null || exit 0
+  trap 'rmdir "$lock_path" 2>/dev/null || true' EXIT
+}
+
+acquire_run_lock
 
 maybe_use_xorg_session() {
     # 已经有可用 DISPLAY 时直接复用当前会话，避免误改环境变量。
