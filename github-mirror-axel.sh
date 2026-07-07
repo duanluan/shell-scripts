@@ -3,8 +3,8 @@
 # title:         github-mirror-axel.sh
 # description:   一个 axel 包装脚本，用于通过镜像加速 GitHub 下载
 # author:        duanluan<duanluan@outlook.com>
-# date:          2026-07-03
-# version:       v3.5
+# date:          2026-07-07
+# version:       v3.6
 # usage:         github-mirror-axel.sh <output_file> <url>
 #
 # description_zh:
@@ -14,6 +14,7 @@
 #   来加速下载。其他 URL 则保持不变。
 #
 # changelog:
+#   v3.6 (2026-07-07)：自我更新完成后，自动继续执行原下载参数
 #   v3.5 (2026-07-03)：commit patch 直接使用原始 GitHub 地址；镜像全部失败后再尝试原始地址
 #   v3.4 (2026-04-18)：修复 axel 下载到 100% 后以 141(SIGPIPE) 退出时被误判失败的问题
 #   v3.3 (2026-02-03)：直连出现错误就不重试
@@ -137,6 +138,7 @@ declare -a proxies=(
 # ===================================================
 check_self_update() {
     local force_check=$1
+    shift
     local current_time=$(date +%s)
 
     # ---------------------------------------------------
@@ -216,10 +218,19 @@ check_self_update() {
     if [ "$need_update" -eq 1 ]; then
         echo "🎉 发现新版本: $remote_ver (当前: $current_ver)"
         echo "📦 正在更新..."
-        mv "$tmp_script" "$0"
-        chmod +x "$0"
-        echo "✅ 更新成功！请重新运行脚本。"
-        exit 0
+        install_tmp=$(mktemp "${0}.tmp.XXXXXX")
+        cp "$tmp_script" "$install_tmp"
+        chmod +x "$install_tmp"
+        mv "$install_tmp" "$0"
+        rm -f "$tmp_script"
+        if [ "$force_check" = "true" ]; then
+            echo "✅ 更新成功！请重新运行脚本。"
+            exit 0
+        fi
+        echo "✅ 更新成功！继续执行原参数..."
+        LAST_CHECK_FILE="$LAST_CHECK_FILE" exec "$0" "$@"
+        echo "❌ 无法重新执行更新后的脚本: $0"
+        exit 1
     else
         echo "✅ 当前已是最新版本 ($current_ver)。"
         rm -f "$tmp_script"
@@ -235,7 +246,7 @@ if [ "$1" == "--self-update" ]; then
 fi
 
 # 默认执行自动更新检查 (受冷却机制保护)
-check_self_update "false"
+check_self_update "false" "$@"
 
 # 检查基本参数
 if [ -z "$OUTPUT_FILE" ] || [ -z "$ORIGINAL_URL" ]; then

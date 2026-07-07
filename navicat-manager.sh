@@ -3,8 +3,8 @@
 # title:         navicat-manager.sh
 # description:   备份、恢复和检查 Navicat Linux 连接、UI 设置与云账号会话
 # author:        duanluan<duanluan@outlook.com>
-# date:          2026-05-25
-# version:       v1.1
+# date:          2026-07-07
+# version:       v1.2
 # usage:         navicat-manager.sh [backup|restore|inspect|reset] [options]
 #
 # description_zh:
@@ -12,6 +12,7 @@
 #   reset 时会保留 Common 连接文件、产品 UI 设置，以及 preferences.json 中可迁移的云账号会话字段。
 #
 # changelog:
+#   v1.2 (2026-07-07)：自更新改为镜像优先，更新脚本后继续执行原命令
 #   v1.1 (2026-06-23)：更新脚本后自动继续执行原命令
 #   v1.0 (2026-05-25)：支持连接/UI/云账号会话备份恢复、reset 保留配置、自动关闭 Navicat、中英提示和自更新
 #===============================================================
@@ -398,12 +399,13 @@ remote_candidate_label() {
 
 download_update_script() {
   local tmp_script=$1
-  local candidates=("direct")
+  local candidates=()
   local entry url label
 
   for entry in "${UPDATE_PROXIES[@]}"; do
     candidates+=("$entry")
   done
+  candidates+=("direct")
 
   for entry in "${candidates[@]}"; do
     url=$(remote_candidate_url "$entry")
@@ -440,7 +442,7 @@ version_gt() {
 check_self_update() {
   local force_check=$1
   shift
-  local current_time last_check elapsed current_ver remote_ver tmp_script
+  local current_time last_check elapsed current_ver remote_ver tmp_script install_tmp
 
   current_time=$(date +%s)
 
@@ -493,10 +495,12 @@ check_self_update() {
 
   if [[ "$(version_gt "$remote_ver" "$current_ver")" == "1" ]]; then
     log "$(fmt "$L_SELF_UPDATE_NEW_VERSION" "$remote_ver" "$current_ver")"
-    [[ -w "$SCRIPT_PATH" ]] || die "$(fmt "$L_SELF_UPDATE_WRITE_FAILED" "$SCRIPT_PATH")"
+    [[ -w "$SCRIPT_PATH" && -w "$(dirname -- "$SCRIPT_PATH")" ]] || die "$(fmt "$L_SELF_UPDATE_WRITE_FAILED" "$SCRIPT_PATH")"
     log "$L_SELF_UPDATE_INSTALLING"
-    cp "$tmp_script" "$SCRIPT_PATH"
-    chmod +x "$SCRIPT_PATH"
+    install_tmp=$(mktemp "${SCRIPT_PATH}.tmp.XXXXXX") || die "$(fmt "$L_SELF_UPDATE_WRITE_FAILED" "$SCRIPT_PATH")"
+    cp "$tmp_script" "$install_tmp"
+    chmod +x "$install_tmp"
+    mv "$install_tmp" "$SCRIPT_PATH"
     rm -f "$tmp_script"
     if [[ "$force_check" == "true" ]]; then
       log "$L_SELF_UPDATE_DONE"
@@ -508,7 +512,10 @@ check_self_update() {
   fi
 
   rm -f "$tmp_script"
-  [[ "$force_check" == "true" ]] && log "$(fmt "$L_SELF_UPDATE_LATEST" "$current_ver")"
+  if [[ "$force_check" == "true" ]]; then
+    log "$(fmt "$L_SELF_UPDATE_LATEST" "$current_ver")"
+  fi
+  return 0
 }
 
 # ==========================================
