@@ -17,7 +17,7 @@
 | `install-launcherx-bin.sh` | 自动更新并构建 AUR `launcherx-bin` | Arch Linux | 会执行 `makepkg -si` 安装 |
 | `navicat-manager.sh` | 管理 Navicat Linux 配置：备份、恢复、检查和 reset | Linux 桌面 + Navicat 16/17 | 会读写 `~/.config/navicat` 和对应 dconf 项，会创建缓存文件、自我更新 |
 | `prepare-jetbrains-zh-plugin.sh` | 自动为 JetBrains 系 IDE 准备可从磁盘安装的中文语言包 | Linux + JetBrains IDE 安装目录 | 会下载或重打包插件 jar 到本地 |
-| `reset_screen.sh` | 关闭再重开指定显示器输出 | X11 + xrandr |  |
+| `reset_screen.sh` | 临时切换分辨率再恢复，用于让屏幕重新亮起 | X11/Wayland + xrandr/kscreen-doctor | 会短暂改变显示器分辨率 |
 | `synology-ignore-monitor.bat` | Windows 下监控并注入 Synology Drive 忽略规则 | Windows + Synology Drive Client + AlwaysUp | 建议作为 AlwaysUp 常驻任务运行；若脚本依赖 `%LOCALAPPDATA%` 等用户环境变量，需在 AlwaysUp 中填写用户和密码 |
 | `synology-ignore-monitor.sh` | 监控并注入 Synology Drive 忽略规则 | Linux + Synology Drive Client | 持续监控并修改配置文件 |
 | `update-github-hosts.sh` | 更新 GitHub hosts 并创建 cron 定时任务 | 通用 Linux | 必须 root，修改 `/etc/hosts`、`/etc/cron.d` |
@@ -289,9 +289,11 @@ Get-ScheduledTask -TaskName "Codex Headroom Port Monitor"
   - 额外导出一份 jar：`bash ./prepare-jetbrains-zh-plugin.sh --jb /path/to/idea --ide rebased --output ~/Downloads/localization-zh.jar`
 
 ### `reset_screen.sh`
-- 功能：通过 `xrandr` 对显示器执行一次 `off -> on`，用于恢复唤醒异常或主屏错乱。
-- 默认自动选择已连接输出口，优先当前主屏和已启用输出，兼容 NVIDIA 常见的 `HDMI-0` 与 AMD/迷你主机常见的 `HDMI-A-0`。
+- 功能：临时切到一个较低分辨率，等待后恢复原分辨率，用于让屏幕重新亮起。
+- 默认自动选择当前已启用且已连接的输出口；KDE/Wayland 优先使用 `kscreen-doctor`，其他 X11 环境优先使用 `xrandr`。
 - 可通过第一个参数或 `RESET_SCREEN_OUTPUT` 指定输出口：`./reset_screen.sh HDMI-0`、`RESET_SCREEN_OUTPUT=HDMI-A-0 ./reset_screen.sh`。
+- 可通过 `RESET_SCREEN_TEMP_MODE` 指定临时分辨率：`RESET_SCREEN_TEMP_MODE=2560x1440@59.95 ./reset_screen.sh`。
+- 可通过 `./reset_screen.sh --self-update` 手动更新脚本；若希望每隔一段时间自动检查更新，可设置 `RESET_SCREEN_AUTO_UPDATE=1`。
 
 ### `synology-ignore-monitor.bat`
 - 功能：Windows 版 Synology Drive 忽略规则监控脚本，持续轮询 `%LOCALAPPDATA%\SynologyDrive\data\session` 下的 `blacklist.filter`，自动补写统一忽略规则。

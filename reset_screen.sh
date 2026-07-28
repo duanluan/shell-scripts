@@ -1,500 +1,596 @@
 #!/bin/bash
+#===============================================================
+# title:         reset_screen.sh
+# description:   临时切换分辨率再恢复，用于让屏幕重新亮起
+# author:        duanluan<duanluan@outlook.com>
+# date:          2026-07-28
+# version:       v2.0
+# usage:         reset_screen.sh [--self-update] [output]
+#
+# changelog:
+# v2.0 (2026-07-28)：默认临时切换到较低分辨率后恢复，保留 xrandr 与 kscreen-doctor 支持，新增手动自更新能力，移除显示电源开关、关闭显示器输出和虚拟机专用处理
+#===============================================================
 
 set -euo pipefail
 
-# 允许两种显式指定输出口的方式：
-# 1. 第一个命令行参数，例如：./reset_screen.sh HDMI-0
-# 2. 环境变量，例如：RESET_SCREEN_OUTPUT=HDMI-A-0 ./reset_screen.sh
-# 如果都没有传入，则后续根据当前桌面环境自动探测一个已连接输出口。
-OUTPUT="${1:-${RESET_SCREEN_OUTPUT:-}}"
+# 用法：
+#   ./reset_screen.sh
+#   ./reset_screen.sh HDMI-0
+#   ./reset_screen.sh --self-update
+#   RESET_SCREEN_OUTPUT=HDMI-0 ./reset_screen.sh
+#   RESET_SCREEN_TEMP_MODE=2560x1440@59.95 ./reset_screen.sh
+#
+# 默认动作：把当前显示器临时切到一个较低分辨率，稍等后恢复原分辨率。
 
-# 默认不关闭输出口，避免已打开的软件收到显示器断开事件。
-# 可选值：
-# - mode：临时切换到另一个分辨率再切回来；
-# - dpms：只执行显示电源关闭/打开；
-# - apply：只重新应用当前配置；
-# - disconnect：关闭输出口再打开，最后兜底使用。
-RESET_METHOD="${RESET_SCREEN_METHOD:-mode}"
-if [[ "${RESET_SCREEN_HARD:-}" == "1" ]]; then
-    RESET_METHOD="disconnect"
-elif [[ "${RESET_SCREEN_HARD:-}" == "0" && -z "${RESET_SCREEN_METHOD:-}" ]]; then
-    RESET_METHOD="apply"
-fi
+SCRIPT_PATH="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/$(basename -- "${BASH_SOURCE[0]}")"
+UPDATE_SOURCE_URL="${RESET_SCREEN_UPDATE_URL:-https://raw.githubusercontent.com/duanluan/shell-scripts/refs/heads/main/reset_screen.sh}"
+LAST_CHECK_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/reset_screen.last_check"
+CHECK_COOLDOWN=86400
+declare -a UPDATE_PROXIES=(
+  "prefix:https://gh-proxy.com/"
+  "prefix:https://ghproxy.net/"
+  "prefix:https://ghfast.top/"
+  "prefix:https://fastgit.cc/"
+)
 
-# 可选：显式指定 X11 DPI，例如 RESET_SCREEN_DPI=144 ./reset_screen.sh。
-# 默认动态读取当前桌面配置；读不到时不传 --dpi。
-DPI_OVERRIDE="${RESET_SCREEN_DPI:-}"
+SELF_UPDATE=0
+OUTPUT=""
+OUTPUT_ARG=""
+TEMP_MODE="${RESET_SCREEN_TEMP_MODE:-}"
+SWITCH_DELAY=1
 
 has_command() {
   command -v "$1" >/dev/null 2>&1
 }
 
-acquire_run_lock() {
-  local lock_base lock_path
+log_update() {
+  printf '%s\n' "$*" >&2
+}
 
-  # 避免连续快捷键触发时，后一个进程把临时分辨率当作正常分辨率保存。
-  lock_base="${XDG_RUNTIME_DIR:-/tmp}"
-  if [[ ! -d "$lock_base" || ! -w "$lock_base" ]]; then
-    lock_base="/tmp"
+die() {
+  printf '%s\n' "$*" >&2
+  exit 1
+}
+
+print_usage() {
+  cat <<'EOF'
+用法：
+  reset_screen.sh [output]
+  reset_screen.sh --self-update
+
+环境变量：
+  RESET_SCREEN_OUTPUT       指定显示器输出口
+  RESET_SCREEN_TEMP_MODE    指定临时分辨率
+  RESET_SCREEN_AUTO_UPDATE  设为 1 时，执行前按冷却时间自动检查更新
+  RESET_SCREEN_UPDATE_URL   覆盖自更新下载地址
+EOF
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --self-update)
+        SELF_UPDATE=1
+        ;;
+      -h|--help)
+        print_usage
+        exit 0
+        ;;
+      --)
+        shift
+        if [[ $# -gt 0 ]]; then
+          if [[ -n "$OUTPUT_ARG" ]]; then
+            die "只能指定一个显示器输出口。"
+          fi
+          OUTPUT_ARG="$1"
+          shift
+        fi
+        if [[ $# -gt 0 ]]; then
+          die "未知参数：$*"
+        fi
+        break
+        ;;
+      -*)
+        die "未知参数：$1"
+        ;;
+      *)
+        if [[ -n "$OUTPUT_ARG" ]]; then
+          die "只能指定一个显示器输出口。"
+        fi
+        OUTPUT_ARG="$1"
+        ;;
+    esac
+    shift
+  done
+
+  OUTPUT="${OUTPUT_ARG:-${RESET_SCREEN_OUTPUT:-}}"
+}
+
+write_update_check_cache() {
+  local current_time="$1"
+
+  mkdir -p "$(dirname -- "$LAST_CHECK_FILE")" 2>/dev/null || return 1
+  printf '%s\n' "$current_time" >"$LAST_CHECK_FILE" 2>/dev/null
+}
+
+current_script_version() {
+  grep -m1 '^# version:' "$SCRIPT_PATH" 2>/dev/null | awk '{print $3}'
+}
+
+remote_candidate_url() {
+  local entry="$1"
+  local mode proxy_url
+
+  if [[ "$entry" == "direct" ]]; then
+    printf '%s\n' "$UPDATE_SOURCE_URL"
+    return 0
   fi
 
-  if has_command flock; then
-    lock_path="${lock_base}/reset_screen.$(id -u).lock"
-    exec 9>"$lock_path"
-    flock -n 9 || exit 0
-    return
+  mode="${entry%%:*}"
+  proxy_url="${entry#*:}"
+
+  case "$mode" in
+    prefix)
+      printf '%s%s\n' "$proxy_url" "$UPDATE_SOURCE_URL"
+      ;;
+  esac
+}
+
+download_update_script() {
+  local tmp_script="$1"
+  local candidates=()
+  local entry url
+
+  if [[ "$UPDATE_SOURCE_URL" == http://* || "$UPDATE_SOURCE_URL" == https://* ]]; then
+    candidates=("${UPDATE_PROXIES[@]}" "direct")
+  else
+    candidates=("direct")
   fi
 
-  lock_path="${lock_base}/reset_screen.$(id -u).lockdir"
-  mkdir "$lock_path" 2>/dev/null || exit 0
-  trap 'rmdir "$lock_path" 2>/dev/null || true' EXIT
+  for entry in "${candidates[@]}"; do
+    url="$(remote_candidate_url "$entry")"
+    [[ -n "$url" ]] || continue
+    if curl -fsSL --connect-timeout 5 --max-time 20 "$url" -o "$tmp_script"; then
+      [[ -s "$tmp_script" ]] && return 0
+    fi
+  done
+
+  return 1
 }
 
-acquire_run_lock
+version_gt() {
+  local left="${1#v}"
+  local right="${2#v}"
 
-maybe_use_xorg_session() {
-    # 已经有可用 DISPLAY 时直接复用当前会话，避免误改环境变量。
-    if [[ -n "${DISPLAY:-}" ]] && xrandr --query >/dev/null 2>&1; then
-        return
+  awk -v left="$left" -v right="$right" '
+    BEGIN {
+      left_count = split(left, left_parts, ".")
+      right_count = split(right, right_parts, ".")
+      max_count = (left_count > right_count) ? left_count : right_count
+
+      for (i = 1; i <= max_count; i++) {
+        left_value = left_parts[i] + 0
+        right_value = right_parts[i] + 0
+
+        if (left_value > right_value) {
+          print 1
+          exit
+        }
+
+        if (left_value < right_value) {
+          print 0
+          exit
+        }
+      }
+
+      print 0
+    }
+  '
+}
+
+check_self_update() {
+  local force_check="$1"
+  shift || true
+
+  local current_time last_check elapsed current_ver tmp_script remote_ver install_tmp
+  current_time="$(date +%s)"
+
+  if [[ "$force_check" != "true" && -f "$LAST_CHECK_FILE" ]]; then
+    last_check="$(cat "$LAST_CHECK_FILE" 2>/dev/null || printf '0')"
+    if [[ "$last_check" =~ ^[0-9]+$ ]]; then
+      elapsed=$((current_time - last_check))
+      [[ "$elapsed" -lt "$CHECK_COOLDOWN" ]] && return 0
+    fi
+  fi
+
+  if ! has_command curl; then
+    [[ "$force_check" == "true" ]] && die "自更新失败：缺少 curl。"
+    return 0
+  fi
+
+  current_ver="$(current_script_version)"
+  if [[ -z "$current_ver" ]]; then
+    [[ "$force_check" == "true" ]] && die "自更新失败：无法读取当前版本。"
+    return 0
+  fi
+
+  [[ "$force_check" == "true" ]] && log_update "当前版本：$current_ver"
+
+  tmp_script="$(mktemp)"
+  if ! download_update_script "$tmp_script"; then
+    rm -f "$tmp_script"
+    write_update_check_cache "$current_time" || true
+    [[ "$force_check" == "true" ]] && die "自更新失败：无法下载远程脚本。"
+    return 0
+  fi
+
+  write_update_check_cache "$current_time" || true
+
+  if ! grep -q '^# title:[[:space:]]*reset_screen.sh' "$tmp_script"; then
+    rm -f "$tmp_script"
+    [[ "$force_check" == "true" ]] && die "自更新失败：远程脚本名称不匹配。"
+    return 0
+  fi
+
+  remote_ver="$(grep -m1 '^# version:' "$tmp_script" | awk '{print $3}')"
+  if [[ -z "$remote_ver" ]]; then
+    rm -f "$tmp_script"
+    [[ "$force_check" == "true" ]] && die "自更新失败：无法读取远程版本。"
+    return 0
+  fi
+
+  if [[ "$(version_gt "$remote_ver" "$current_ver")" == "1" ]]; then
+    [[ -w "$SCRIPT_PATH" && -w "$(dirname -- "$SCRIPT_PATH")" ]] || {
+      rm -f "$tmp_script"
+      die "自更新失败：当前脚本不可写：$SCRIPT_PATH"
+    }
+
+    log_update "发现新版本：$remote_ver（当前：$current_ver）"
+    install_tmp="$(mktemp "${SCRIPT_PATH}.tmp.XXXXXX")" || {
+      rm -f "$tmp_script"
+      die "自更新失败：无法创建临时安装文件。"
+    }
+    cp "$tmp_script" "$install_tmp"
+    chmod +x "$install_tmp"
+    mv "$install_tmp" "$SCRIPT_PATH"
+    rm -f "$tmp_script"
+
+    if [[ "$force_check" == "true" ]]; then
+      log_update "自更新完成。"
+      exit 0
     fi
 
-    local current_uid xorg_args auth_file
+    log_update "自更新完成，继续执行当前操作。"
+    RESET_SCREEN_SKIP_SELF_UPDATE=1 exec "$SCRIPT_PATH" "$@"
+    die "自更新失败：无法重新执行脚本。"
+  fi
 
-    # 某些从 SSH、TTY 或快捷键服务启动的脚本没有 DISPLAY/XAUTHORITY。
-    # 这里只查找当前用户自己的 Xorg 进程，避免多用户环境里拿到别人的认证文件。
-    current_uid="$(id -u)"
-    xorg_args="$(pgrep -u "$current_uid" -a Xorg | head -n 1 || true)"
-
-    # Xorg 启动参数中通常包含 "-auth /path/to/Xauthority"。
-    # awk 从完整命令行中提取 -auth 后面的文件路径。
-    auth_file="$(awk '
-        {
-            for (i = 1; i <= NF; i++) {
-                if ($i == "-auth" && (i + 1) <= NF) {
-                    print $(i + 1)
-                    exit
-                }
-            }
-        }
-    ' <<<"$xorg_args")"
-
-    # 只有认证文件存在且当前用户可读时才补齐环境变量。
-    # DISPLAY 默认用 :0，适配单桌面会话的常见场景。
-    if [[ -n "$auth_file" && -r "$auth_file" ]]; then
-        export DISPLAY="${DISPLAY:-:0}"
-        export XAUTHORITY="$auth_file"
-    fi
+  rm -f "$tmp_script"
+  [[ "$force_check" == "true" ]] && log_update "已是最新版本：$current_ver"
+  return 0
 }
 
-xrandr_is_usable() {
-    # 不能只判断 xrandr 命令是否存在；Wayland/KDE 下它可能存在但无法控制输出。
-    # 先尝试补齐 Xorg 环境，再用 xrandr --query 作为可用性判断。
-    maybe_use_xorg_session
-    xrandr --query >/dev/null 2>&1
+strip_ansi() {
+  sed -E $'s/\x1b\\[[0-9;]*[[:alpha:]]//g'
 }
 
-detect_xrandr_output() {
-    # 在 xrandr 输出中选择一个已连接输出口。
-    # 评分策略：
-    # - primary 优先，尽量保持用户当前主屏；
-    # - 已启用并带坐标的输出其次，避免选中连接但未启用的口；
-    # - HDMI 再优先于 DP，兼容本脚本原本主要处理 HDMI 的使用场景。
-    xrandr --query | awk '
-        /^[^[:space:]]+ connected/ {
-            score = 0
-            if ($0 ~ / primary /) {
-                score += 100
-            }
-            if ($0 ~ /[0-9]+x[0-9]+\+[0-9]+\+[0-9]+/) {
-                score += 50
-            }
-            if ($1 ~ /^HDMI/) {
-                score += 20
-            }
-            if ($1 ~ /^DP/ || $1 ~ /^DisplayPort/) {
-                score += 10
-            }
-            if (best == "" || score > best_score) {
-                best = $1
-                best_score = score
-            }
-        }
-        END {
-            if (best != "") {
-                print best
-            } else {
-                exit 1
-            }
-        }
-    '
+prefer_kscreen() {
+  [[ "${XDG_SESSION_TYPE:-}" == "wayland" ]] && return 0
+  [[ "${KDE_FULL_SESSION:-}" == "true" ]] && return 0
+  [[ "${XDG_CURRENT_DESKTOP:-}" == *KDE* ]] && return 0
+  [[ "${XDG_CURRENT_DESKTOP:-}" == *Plasma* ]] && return 0
+  [[ "${DESKTOP_SESSION:-}" == *plasma* ]] && return 0
+  [[ "${DESKTOP_SESSION:-}" == *kde* ]] && return 0
+  return 1
+}
+
+kscreen_info() {
+  NO_COLOR=1 kscreen-doctor -o 2>/dev/null | strip_ansi
 }
 
 detect_kscreen_output() {
-    # kscreen-doctor 是 KDE/Wayland 场景更可靠的显示配置工具。
-    # 输出行在不同版本里可能是 "Output: 1 HDMI-A-0 ... connected"，
-    # 也可能带有 name=HDMI-A-0，这里同时兼容两种格式。
-    kscreen-doctor -o | awk '
-        /^Output: / {
-            connected = 0
-            name = ""
-            for (i = 1; i <= NF; i++) {
-                if ($i == "connected") {
-                    connected = 1
-                }
-                if ($i ~ /^name=/) {
-                    name = $i
-                    sub(/^name=/, "", name)
-                }
-            }
-            if (name == "" && NF >= 3) {
-                name = $3
-            }
-            if (connected && name != "") {
-                print name
-                exit
-            }
+  local info="$1"
+
+  awk '
+    /^Output:/ {
+      if ($0 ~ / enabled / && $0 ~ / connected /) {
+        print $3
+        exit
+      }
+    }
+  ' <<<"$info"
+}
+
+get_kscreen_current_mode_info() {
+  local info="$1"
+  local output="$2"
+
+  awk -v output="$output" '
+    /^Output:/ {
+      active = ($3 == output)
+      next
+    }
+    active && /Modes:/ {
+      for (i = 1; i <= NF; i++) {
+        raw = $i
+        if (raw ~ /^[0-9]+:[0-9]+x[0-9]+@[0-9.]+[*!]*$/ && raw ~ /\*/) {
+          id = raw
+          sub(/:.*/, "", id)
+          mode = raw
+          sub(/^[0-9]+:/, "", mode)
+          gsub(/[*!]/, "", mode)
+          print id, mode
+          exit
         }
-    '
+      }
+    }
+  ' <<<"$info"
+}
+
+get_kscreen_position() {
+  local info="$1"
+  local output="$2"
+
+  awk -v output="$output" '
+    /^Output:/ {
+      active = ($3 == output)
+      next
+    }
+    active && /^[[:space:]]*Geometry:/ {
+      print $2
+      exit
+    }
+  ' <<<"$info"
+}
+
+choose_kscreen_temp_mode_id() {
+  local info="$1"
+  local output="$2"
+  local current_mode="$3"
+
+  awk -v output="$output" -v current_mode="$current_mode" -v requested="$TEMP_MODE" '
+    BEGIN {
+      split(current_mode, current_parts, "@")
+      split(current_parts[1], current_size, "x")
+      current_area = current_size[1] * current_size[2]
+      best_area = 0
+    }
+    /^Output:/ {
+      active = ($3 == output)
+      next
+    }
+    active && /Modes:/ {
+      for (i = 1; i <= NF; i++) {
+        raw = $i
+        if (raw !~ /^[0-9]+:[0-9]+x[0-9]+@[0-9.]+[*!]*$/) {
+          continue
+        }
+
+        id = raw
+        sub(/:.*/, "", id)
+        mode = raw
+        sub(/^[0-9]+:/, "", mode)
+        gsub(/[*!]/, "", mode)
+
+        split(mode, parts, "@")
+        split(parts[1], size, "x")
+        area = size[1] * size[2]
+
+        if (requested != "") {
+          if (requested == id || requested == mode || requested == parts[1]) {
+            selected = id
+          }
+          continue
+        }
+
+        if (mode != current_mode && area < current_area && area > best_area) {
+          best = id
+          best_area = area
+        }
+      }
+    }
+    END {
+      if (requested != "" && selected != "") {
+        print selected
+      } else if (requested == "" && best != "") {
+        print best
+      } else {
+        exit 1
+      }
+    }
+  ' <<<"$info"
+}
+
+reset_with_kscreen() {
+  has_command kscreen-doctor || return 1
+
+  local info selected_output current_info current_mode_id current_mode temp_mode_id position
+  info="$(kscreen_info)" || return 1
+
+  selected_output="$OUTPUT"
+  if [[ -z "$selected_output" ]]; then
+    selected_output="$(detect_kscreen_output "$info")" || return 1
+  fi
+  [[ -n "$selected_output" ]] || return 1
+
+  current_info="$(get_kscreen_current_mode_info "$info" "$selected_output")" || return 1
+  [[ -n "$current_info" ]] || return 1
+  read -r current_mode_id current_mode <<<"$current_info"
+
+  temp_mode_id="$(choose_kscreen_temp_mode_id "$info" "$selected_output" "$current_mode")" || return 1
+  [[ -n "$temp_mode_id" ]] || return 1
+
+  position="$(get_kscreen_position "$info" "$selected_output" || true)"
+
+  local temp_args restore_args
+  temp_args=("output.${selected_output}.mode.${temp_mode_id}")
+  restore_args=("output.${selected_output}.mode.${current_mode_id}")
+
+  if [[ -n "$position" && "$position" != "0,0" ]]; then
+    temp_args+=("output.${selected_output}.position.${position}")
+    restore_args+=("output.${selected_output}.position.${position}")
+  fi
+
+  kscreen-doctor "${temp_args[@]}" >/dev/null
+  sleep "$SWITCH_DELAY"
+  kscreen-doctor "${restore_args[@]}" >/dev/null
+}
+
+detect_xrandr_output() {
+  local query="$1"
+
+  awk '
+    /^[^[:space:]]+ connected/ {
+      score = 0
+      if ($0 ~ / primary /) {
+        score += 100
+      }
+      if ($0 ~ /[0-9]+x[0-9]+\+[0-9]+\+[0-9]+/) {
+        score += 50
+      }
+      if ($1 ~ /^HDMI/) {
+        score += 20
+      }
+      if ($1 ~ /^DP/ || $1 ~ /^DisplayPort/) {
+        score += 10
+      }
+      if (best == "" || score > best_score) {
+        best = $1
+        best_score = score
+      }
+    }
+    END {
+      if (best != "") {
+        print best
+      } else {
+        exit 1
+      }
+    }
+  ' <<<"$query"
 }
 
 get_xrandr_state() {
-    local output="$1"
+  local query="$1"
+  local output="$2"
 
-    # 保存当前输出口的分辨率、位置和主屏状态，避免 --auto 重新选择配置。
-    xrandr --query | awk -v output="$output" '
-        $1 == output && $2 == "connected" {
-            primary = ($0 ~ / primary /) ? "1" : "0"
-            for (i = 3; i <= NF; i++) {
-                if ($i ~ /^[0-9]+x[0-9]+\+[0-9]+\+[0-9]+$/) {
-                    split($i, geometry, /[+]/)
-                    print geometry[1], geometry[2], geometry[3], primary
-                    exit
-                }
-            }
+  awk -v output="$output" '
+    $1 == output && $2 == "connected" {
+      primary = ($0 ~ / primary /) ? "1" : "0"
+      for (i = 3; i <= NF; i++) {
+        if ($i ~ /^[0-9]+x[0-9]+\+[0-9]+\+[0-9]+$/) {
+          split($i, geometry, /[+]/)
+          print geometry[1], geometry[2], geometry[3], primary
+          exit
         }
-    '
+      }
+    }
+  ' <<<"$query"
 }
 
-get_xrandr_fallback_mode() {
-    local output="$1"
-    local current_mode="$2"
+choose_xrandr_temp_mode() {
+  local query="$1"
+  local output="$2"
+  local current_mode="$3"
 
-    # 选择同一输出口上一个接近当前模式的较低分辨率，避免关闭输出口。
-    xrandr --query | awk -v output="$output" -v current_mode="$current_mode" '
-        $1 == output && $2 == "connected" {
-            active = 1
-            split(current_mode, current_size, "x")
-            current_area = current_size[1] * current_size[2]
-            next
-        }
-        active && /^[^[:space:]]/ {
-            exit
-        }
-        active && /^[[:space:]]+[0-9]+x[0-9]+/ {
-            mode = $1
-            split(mode, size, "x")
-            area = size[1] * size[2]
-            if (mode != current_mode && area < current_area && area > best_area) {
-                best = mode
-                best_area = area
-            }
-        }
-        END {
-            if (best != "") {
-                print best
-            }
-        }
-    '
+  if [[ -n "$TEMP_MODE" ]]; then
+    printf '%s\n' "${TEMP_MODE%@*}"
+    return 0
+  fi
+
+  awk -v output="$output" -v current_mode="$current_mode" '
+    BEGIN {
+      split(current_mode, current_size, "x")
+      current_area = current_size[1] * current_size[2]
+      best_area = 0
+    }
+    $1 == output && $2 == "connected" {
+      active = 1
+      next
+    }
+    active && /^[^[:space:]]/ {
+      active = 0
+    }
+    active && /^[[:space:]]+[0-9]+x[0-9]+/ {
+      mode = $1
+      split(mode, size, "x")
+      area = size[1] * size[2]
+      if (mode != current_mode && area < current_area && area > best_area) {
+        best = mode
+        best_area = area
+      }
+    }
+    END {
+      if (best != "") {
+        print best
+      } else {
+        exit 1
+      }
+    }
+  ' <<<"$query"
 }
 
-apply_xrandr_state() {
-    local state="$1"
-    local dpi="${2:-}"
-    local mode xpos ypos primary
-    local args
+apply_xrandr_mode() {
+  local output="$1"
+  local mode="$2"
+  local xpos="$3"
+  local ypos="$4"
+  local primary="$5"
 
-    if [[ -n "$state" ]]; then
-        read -r mode xpos ypos primary <<<"$state"
-        args=(--output "$OUTPUT" --mode "$mode" --pos "${xpos}x${ypos}")
-        if [[ "$primary" == "1" ]]; then
-            args+=(--primary)
-        fi
-        if [[ -n "$dpi" ]]; then
-            args+=(--dpi "$dpi")
-        fi
-        xrandr "${args[@]}"
-    else
-        args=(--output "$OUTPUT" --auto --primary)
-        if [[ -n "$dpi" ]]; then
-            args+=(--dpi "$dpi")
-        fi
-        xrandr "${args[@]}"
-    fi
-}
+  local args
+  args=(--output "$output" --mode "$mode" --pos "${xpos}x${ypos}")
+  if [[ "$primary" == "1" ]]; then
+    args+=(--primary)
+  fi
 
-reset_xrandr_with_mode_switch() {
-    local state="$1"
-    local dpi="$2"
-    local mode xpos ypos primary fallback_mode
-
-    [[ -n "$state" ]] || return 1
-    read -r mode xpos ypos primary <<<"$state"
-    fallback_mode="$(get_xrandr_fallback_mode "$OUTPUT" "$mode")"
-    [[ -n "$fallback_mode" ]] || return 1
-
-    xrandr --output "$OUTPUT" --mode "$fallback_mode" --pos "${xpos}x${ypos}" ${dpi:+--dpi "$dpi"}
-    sleep 1
-    apply_xrandr_state "$state" "$dpi"
-}
-
-get_kscreen_state() {
-    local output="$1"
-
-    # 保存 KDE/Wayland 当前输出口的位置和缩放。mode 若未精确读取到，由 KScreen 保持原配置。
-    kscreen-doctor -o | awk -v output="$output" '
-        /^Output: / {
-            active = 0
-            name = ""
-            for (i = 1; i <= NF; i++) {
-                if ($i ~ /^name=/) {
-                    name = $i
-                    sub(/^name=/, "", name)
-                }
-            }
-            if (name == "" && NF >= 3) {
-                name = $3
-            }
-            if (name == output) {
-                active = 1
-            }
-            next
-        }
-        active && /^[[:space:]]*Geometry:/ {
-            split($2, pos, ",")
-            if (pos[1] != "" && pos[2] != "") {
-                print "position." pos[1] "," pos[2]
-            }
-            next
-        }
-        active && /^[[:space:]]*Scale:/ {
-            if ($2 != "") {
-                print "scale." $2
-            }
-            next
-        }
-    '
-}
-
-apply_kscreen_state() {
-    local state="$1"
-    local args setting
-
-    args=("output.${OUTPUT}.enable")
-    while IFS= read -r setting; do
-        [[ -n "$setting" ]] || continue
-        args+=("output.${OUTPUT}.${setting}")
-    done <<<"$state"
-
-    kscreen-doctor "${args[@]}"
-}
-
-read_kde_config() {
-    local group="$1"
-    local key="$2"
-
-    if has_command kreadconfig6; then
-        kreadconfig6 --file kdeglobals --group "$group" --key "$key" 2>/dev/null && return 0
-    fi
-
-    if has_command kreadconfig5; then
-        kreadconfig5 --file kdeglobals --group "$group" --key "$key" 2>/dev/null && return 0
-    fi
-
-    return 1
-}
-
-get_kde_scale_factor() {
-    local scale_factors scale
-
-    if [[ -n "$OUTPUT" ]]; then
-        scale_factors="$(read_kde_config KScreen ScreenScaleFactors || true)"
-        scale="$(
-            awk -v output="$OUTPUT" '
-                BEGIN {
-                    RS = ";"
-                    FS = "="
-                }
-                $1 == output && $2 ~ /^[0-9]+([.][0-9]+)?$/ {
-                    print $2
-                    exit
-                }
-            ' <<<"$scale_factors"
-        )"
-
-        if [[ -n "$scale" ]]; then
-            printf '%s\n' "$scale"
-            return 0
-        fi
-    fi
-
-    read_kde_config KScreen ScaleFactor | awk '
-        /^[0-9]+([.][0-9]+)?$/ {
-            print
-            exit
-        }
-    '
-}
-
-get_xft_dpi() {
-    xrdb -query 2>/dev/null | awk -F: '
-        $1 == "Xft.dpi" {
-            gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
-            if ($2 ~ /^[0-9]+([.][0-9]+)?$/) {
-                print $2
-                exit
-            }
-        }
-    '
-}
-
-normalize_dpi() {
-    awk -v dpi="$1" '
-        BEGIN {
-            if (dpi ~ /^[0-9]+([.][0-9]+)?$/ && dpi > 0) {
-                printf "%.0f\n", dpi
-            }
-        }
-    '
-}
-
-detect_x11_dpi() {
-    local scale dpi
-
-    if [[ -n "$DPI_OVERRIDE" ]]; then
-        normalize_dpi "$DPI_OVERRIDE"
-        return
-    fi
-
-    scale="$(get_kde_scale_factor || true)"
-    if [[ -n "$scale" ]]; then
-        awk -v scale="$scale" 'BEGIN { printf "%.0f\n", scale * 96 }'
-        return 0
-    fi
-
-    dpi="$(get_xft_dpi || true)"
-    if [[ -n "$dpi" ]]; then
-        awk -v dpi="$dpi" 'BEGIN { printf "%.0f\n", dpi }'
-    fi
-}
-
-reload_xsettingsd() {
-    if pgrep -u "$(id -u)" -x xsettingsd >/dev/null 2>&1; then
-        pkill -HUP -u "$(id -u)" -x xsettingsd >/dev/null 2>&1 || true
-    fi
-}
-
-reconfigure_kde() {
-    if has_command qdbus6; then
-        qdbus6 org.kde.kded6 /kded org.kde.kded6.reconfigure >/dev/null 2>&1 || true
-        qdbus6 org.kde.KWin /KWin org.kde.KWin.reconfigure >/dev/null 2>&1 || true
-        return
-    fi
-
-    if has_command qdbus; then
-        qdbus org.kde.kded6 /kded org.kde.kded6.reconfigure >/dev/null 2>&1 || true
-        qdbus org.kde.KWin /KWin org.kde.KWin.reconfigure >/dev/null 2>&1 || true
-    fi
-}
-
-refresh_x11_scaling() {
-    local dpi
-
-    [[ -n "${DISPLAY:-}" ]] || return
-
-    dpi="$(detect_x11_dpi || true)"
-    if [[ -n "$dpi" ]]; then
-        xrandr --dpi "$dpi" >/dev/null 2>&1 || true
-        printf 'Xft.dpi:\t%s\n' "$dpi" | xrdb -merge >/dev/null 2>&1 || true
-    fi
-
-    reload_xsettingsd
-    reconfigure_kde
+  xrandr "${args[@]}" >/dev/null
 }
 
 reset_with_xrandr() {
-    # 主流程再次补齐 Xorg 环境，保证直接调用此函数时也能工作。
-    maybe_use_xorg_session
+  has_command xrandr || return 1
 
-    if [[ -z "$OUTPUT" ]]; then
-        OUTPUT="$(detect_xrandr_output)"
-    fi
+  local query selected_output state current_mode xpos ypos primary temp_mode
+  query="$(xrandr --query 2>/dev/null)" || return 1
 
-    local state dpi
-    state="$(get_xrandr_state "$OUTPUT")"
-    dpi="$(detect_x11_dpi || true)"
+  selected_output="$OUTPUT"
+  if [[ -z "$selected_output" ]]; then
+    selected_output="$(detect_xrandr_output "$query")" || return 1
+  fi
+  [[ -n "$selected_output" ]] || return 1
 
-    # 先尝试唤醒 DPMS，再按当前配置重新应用。
-    # xset 在部分环境不可用，不应影响真正的 xrandr 重置动作。
-    xset dpms force on >/dev/null 2>&1 || true
+  state="$(get_xrandr_state "$query" "$selected_output")" || return 1
+  [[ -n "$state" ]] || return 1
+  read -r current_mode xpos ypos primary <<<"$state"
 
-    case "$RESET_METHOD" in
-        mode)
-            reset_xrandr_with_mode_switch "$state" "$dpi" || apply_xrandr_state "$state" "$dpi"
-            ;;
-        dpms)
-            xset dpms force off >/dev/null 2>&1 || true
-            sleep 1
-            xset dpms force on >/dev/null 2>&1 || true
-            apply_xrandr_state "$state" "$dpi"
-            ;;
-        apply)
-            apply_xrandr_state "$state" "$dpi"
-            ;;
-        disconnect)
-            xrandr --output "$OUTPUT" --off
-            sleep 1
-            apply_xrandr_state "$state" "$dpi"
-            ;;
-        *)
-            echo "RESET_SCREEN_METHOD 只能是 mode、dpms、apply 或 disconnect" >&2
-            exit 1
-            ;;
-    esac
+  temp_mode="$(choose_xrandr_temp_mode "$query" "$selected_output" "$current_mode")" || return 1
+  [[ -n "$temp_mode" ]] || return 1
 
-    refresh_x11_scaling
-    xset dpms force on >/dev/null 2>&1 || true
+  apply_xrandr_mode "$selected_output" "$temp_mode" "$xpos" "$ypos" "$primary"
+  sleep "$SWITCH_DELAY"
+  apply_xrandr_mode "$selected_output" "$current_mode" "$xpos" "$ypos" "$primary"
 }
 
-reset_with_kscreen_doctor() {
-    if [[ -z "$OUTPUT" ]]; then
-        OUTPUT="$(detect_kscreen_output)"
-    fi
+main() {
+  parse_args "$@"
 
-    local state
-    state="$(get_kscreen_state "$OUTPUT")"
+  if [[ "$SELF_UPDATE" -eq 1 ]]; then
+    check_self_update "true"
+    return 0
+  fi
 
-    # KDE/Wayland 下默认只重新应用当前配置，避免已打开的软件收到显示器断开事件。
-    if [[ "$RESET_METHOD" == "disconnect" ]]; then
-        kscreen-doctor "output.${OUTPUT}.disable"
-        sleep 1
-    elif [[ "$RESET_METHOD" == "dpms" ]]; then
-        sleep 1
-    elif [[ "$RESET_METHOD" != "mode" && "$RESET_METHOD" != "apply" ]]; then
-        echo "RESET_SCREEN_METHOD 只能是 mode、dpms、apply 或 disconnect" >&2
-        exit 1
-    fi
+  if [[ "${RESET_SCREEN_AUTO_UPDATE:-0}" == "1" && "${RESET_SCREEN_SKIP_SELF_UPDATE:-0}" != "1" ]]; then
+    check_self_update "false" "$@"
+  fi
 
-    apply_kscreen_state "$state"
-    refresh_x11_scaling
+  if prefer_kscreen; then
+    reset_with_kscreen && return 0
+    reset_with_xrandr && return 0
+  else
+    reset_with_xrandr && return 0
+    reset_with_kscreen && return 0
+  fi
+
+  echo "无法临时切换分辨率：请确认 kscreen-doctor 或 xrandr 可用，并且当前显示器有可切换的较低分辨率。" >&2
+  return 1
 }
 
-# 优先使用真正可用的 xrandr；如果 xrandr 存在但当前会话不可用，
-# 则回退到 kscreen-doctor，避免 Wayland 环境直接失败。
-if has_command xrandr && xrandr_is_usable; then
-    reset_with_xrandr
-elif has_command kscreen-doctor; then
-    reset_with_kscreen_doctor
-else
-    echo "需要安装可用的 xrandr 或 kscreen-doctor" >&2
-    exit 1
-fi
+main "$@"
