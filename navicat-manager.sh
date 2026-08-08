@@ -4,7 +4,7 @@
 # description:   备份、恢复和检查 Navicat Linux 连接、UI 设置与云账号会话
 # author:        duanluan<duanluan@outlook.com>
 # date:          2026-07-07
-# version:       v1.2
+# version:       v1.3
 # usage:         navicat-manager.sh [backup|restore|inspect|reset] [options]
 #
 # description_zh:
@@ -12,6 +12,7 @@
 #   reset 时会保留 Common 连接文件、产品 UI 设置，以及 preferences.json 中可迁移的云账号会话字段。
 #
 # changelog:
+#   v1.3 (2026-08-08)：reset 等待真实窗口关闭，超时保留恢复副本
 #   v1.2 (2026-07-07)：自更新改为镜像优先，更新脚本后继续执行原命令
 #   v1.1 (2026-06-23)：更新脚本后自动继续执行原命令
 #   v1.0 (2026-05-25)：支持连接/UI/云账号会话备份恢复、reset 保留配置、自动关闭 Navicat、中英提示和自更新
@@ -74,6 +75,8 @@ L_START_BACKUP="Starting backup to %s..."
 L_DRY_RUN_BACKUP="[dry-run] Would back up %s and %s to %s"
 L_SAFETY_BACKUP_WRITTEN="Safety backup written: %s"
 L_SAFETY_BACKUP_BEFORE="Creating safety backup before writing..."
+L_RESET_PRESERVE_WRITTEN="Reset recovery copy written: %s"
+L_RESET_PRESERVE_FAILED="Cannot create reset recovery copy under: %s"
 L_INVALID_JSON="Invalid JSON: %s"
 L_DRY_RUN_MERGE_PREF="[dry-run] Would merge portable preference keys: %s -> %s"
 L_MISSING_CONNECTIONS="Missing connections.json in backup: %s"
@@ -113,16 +116,17 @@ L_START_NAVICAT=">>> Start Navicat now."
 L_WAIT_PREF="Waiting for preferences.json: %s"
 L_WAIT_START_LONG="Waiting... %d seconds. Start Navicat."
 L_WAIT_PREF_PROGRESS="Waiting for preferences.json... %d seconds"
-L_TIMEOUT_PREF="Timed out. New preferences.json was not detected."
-L_TIMEOUT_PREF_HINT="Rerun reset and start Navicat when prompted."
+L_TIMEOUT_PREF="Timed out. A new Navicat window or preferences.json was not detected."
+L_TIMEOUT_PREF_HINT="Original config is kept at: %s. Restore it with: %s restore %s"
 L_DETECTED_PREF="New preferences.json detected: %s"
 L_CONFIRM_AUTO_CLOSE_NAVICAT="Close Navicat automatically?"
 L_AUTO_CLOSE_NAVICAT="Closing Navicat..."
-L_CLOSE_NAVICAT_NOW=">>> Close Navicat now."
-L_WAIT_CLOSE_LONG="Waiting... %d seconds. Close Navicat."
-L_WAIT_EXIT_PROGRESS="Waiting for Navicat to exit... %d seconds"
-L_NAVICAT_STILL_RUNNING="Navicat is still running. Close Navicat and rerun reset; if the window is already closed, rerun: %s reset --kill"
-L_NAVICAT_CLOSED="Navicat closed; restoring config."
+L_CLOSE_NAVICAT_NOW=">>> Close all Navicat windows now."
+L_WAIT_CLOSE_LONG="Waiting... %d seconds. Close Navicat windows."
+L_WAIT_EXIT_PROGRESS="Waiting for Navicat windows to close... %d seconds"
+L_NAVICAT_WINDOW_OPEN_BEFORE_RESET="Navicat window is still open. Close it before reset."
+L_NAVICAT_STILL_RUNNING="Navicat window is still open. Original config is kept at: %s. Restore it with: %s restore %s"
+L_NAVICAT_CLOSED="Navicat windows closed; restoring config."
 L_RESTORE_PREVIOUS="Restoring previous connections, UI settings, and cloud account sessions..."
 L_SETTINGS_MERGED="Settings merged."
 L_RESET_DONE="Reset finished. You can open Navicat now."
@@ -175,6 +179,8 @@ if [[ "${LANG:-}" == *"zh_"* ]]; then
   L_DRY_RUN_BACKUP="[预演] 将备份 %s 和 %s 到 %s"
   L_SAFETY_BACKUP_WRITTEN="安全备份已写入: %s"
   L_SAFETY_BACKUP_BEFORE="写入前先创建安全备份..."
+  L_RESET_PRESERVE_WRITTEN="reset 恢复副本已写入: %s"
+  L_RESET_PRESERVE_FAILED="无法在此目录创建 reset 恢复副本: %s"
   L_INVALID_JSON="JSON 文件无效: %s"
   L_DRY_RUN_MERGE_PREF="[预演] 将合并可迁移偏好字段: %s -> %s"
   L_MISSING_CONNECTIONS="备份中缺少 connections.json: %s"
@@ -214,16 +220,17 @@ if [[ "${LANG:-}" == *"zh_"* ]]; then
   L_WAIT_PREF="等待 preferences.json: %s"
   L_WAIT_START_LONG="等待中... %d 秒。请启动 Navicat。"
   L_WAIT_PREF_PROGRESS="正在等待 preferences.json... %d 秒"
-  L_TIMEOUT_PREF="超时，未检测到新的 preferences.json。"
-  L_TIMEOUT_PREF_HINT="请重新执行 reset，并在提示后启动 Navicat。"
+  L_TIMEOUT_PREF="超时，未检测到新的 Navicat 窗口或 preferences.json。"
+  L_TIMEOUT_PREF_HINT="原配置已保留在: %s。请使用以下命令恢复: %s restore %s"
   L_DETECTED_PREF="已检测到新的 preferences.json: %s"
   L_CONFIRM_AUTO_CLOSE_NAVICAT="是否自动关闭 Navicat？"
   L_AUTO_CLOSE_NAVICAT="正在自动关闭 Navicat..."
-  L_CLOSE_NAVICAT_NOW=">>> 请关闭 Navicat。"
-  L_WAIT_CLOSE_LONG="等待中... %d 秒。请关闭 Navicat。"
-  L_WAIT_EXIT_PROGRESS="正在等待 Navicat 退出... %d 秒"
-  L_NAVICAT_STILL_RUNNING="Navicat 仍在运行。请关闭 Navicat 后重新执行 reset；如果确认界面已经关掉，可重新执行: %s reset --kill"
-  L_NAVICAT_CLOSED="Navicat 已关闭，可以恢复配置。"
+  L_CLOSE_NAVICAT_NOW=">>> 请关闭所有 Navicat 窗口。"
+  L_WAIT_CLOSE_LONG="等待中... %d 秒。请关闭所有 Navicat 窗口。"
+  L_WAIT_EXIT_PROGRESS="正在等待 Navicat 窗口关闭... %d 秒"
+  L_NAVICAT_WINDOW_OPEN_BEFORE_RESET="Navicat 窗口仍未关闭，请先关闭后再 reset。"
+  L_NAVICAT_STILL_RUNNING="Navicat 窗口仍未关闭。原配置已保留在: %s。请使用以下命令恢复: %s restore %s"
+  L_NAVICAT_CLOSED="Navicat 窗口已关闭，正在恢复配置。"
   L_RESTORE_PREVIOUS="正在恢复原有连接、UI 设置和云账号会话..."
   L_SETTINGS_MERGED="设置已合并完成。"
   L_RESET_DONE="重置完成。你可以正常打开 Navicat 继续使用了。"
@@ -299,7 +306,25 @@ dconf_path() {
 
 navicat_running() {
   pgrep -u "$(id -u)" -x navicat >/dev/null 2>&1 || \
-    pgrep -u "$(id -u)" -x Navicat >/dev/null 2>&1
+  pgrep -u "$(id -u)" -x Navicat >/dev/null 2>&1
+}
+
+navicat_window_open() {
+  if command -v xdotool >/dev/null 2>&1; then
+    xdotool search --onlyvisible --class navicat >/dev/null 2>&1 && return 0
+    xdotool search --onlyvisible --name 'Navicat' >/dev/null 2>&1 && return 0
+    return 1
+  fi
+
+  if command -v wmctrl >/dev/null 2>&1; then
+    wmctrl -lx 2>/dev/null | awk '
+      tolower($3) ~ /(^|[.])navicat([.]|$)/ || tolower($0) ~ /navicat premium/ { found = 1 }
+      END { exit found ? 0 : 1 }
+    '
+    return $?
+  fi
+
+  navicat_running
 }
 
 close_navicat_processes() {
@@ -776,6 +801,9 @@ reset_action() {
   confirm "$L_CONFIRM_RESET" || die "$L_CANCELLED"
 
   close_navicat_if_needed
+  if navicat_window_open; then
+    die "$L_NAVICAT_WINDOW_OPEN_BEFORE_RESET"
+  fi
 
   local pref
   pref=$(pref_file)
@@ -783,7 +811,12 @@ reset_action() {
   local dconf_target
   dconf_target=$(dconf_path)
   local keep_dir keep_navicat
-  keep_dir=$(mktemp -d)
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    keep_dir=$(mktemp -d)
+  else
+    mkdir -p "$BACKUP_ROOT" || die "$(fmt "$L_RESET_PRESERVE_FAILED" "$BACKUP_ROOT")"
+    keep_dir=$(mktemp -d "$BACKUP_ROOT/reset-preserve-$(date +%Y%m%d-%H%M%S).XXXXXX") || die "$(fmt "$L_RESET_PRESERVE_FAILED" "$BACKUP_ROOT")"
+  fi
   keep_navicat="$keep_dir/navicat"
 
   # 1. 保存当前连接、UI、账号会话配置，后续放回新配置里。
@@ -792,6 +825,8 @@ reset_action() {
   else
     log "$L_PRESERVE_CURRENT"
     copy_current_navicat_tree "$keep_dir"
+    write_manifest "$keep_dir"
+    log "$(fmt "$L_RESET_PRESERVE_WRITTEN" "$keep_dir")"
   fi
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -833,14 +868,13 @@ reset_action() {
   printf "\n"
 
   if [[ ! -f "$pref" ]]; then
-    rm -rf "$keep_dir"
     log "❌ $L_TIMEOUT_PREF"
-    die "$L_TIMEOUT_PREF_HINT"
+    die "$(fmt "$L_TIMEOUT_PREF_HINT" "$keep_dir" "$0" "$keep_dir")"
   fi
 
   log "✅ $(fmt "$L_DETECTED_PREF" "$pref")"
 
-  if navicat_running; then
+  if navicat_window_open; then
     echo ""
     if confirm "$L_CONFIRM_AUTO_CLOSE_NAVICAT"; then
       log "$L_AUTO_CLOSE_NAVICAT"
@@ -852,7 +886,7 @@ reset_action() {
   fi
 
   count=0
-  while navicat_running && [[ $count -lt $max_wait ]]; do
+  while navicat_window_open && [[ $count -lt $max_wait ]]; do
     sleep 1
     count=$((count + 1))
     if (( count % 10 == 0 )); then
@@ -863,9 +897,8 @@ reset_action() {
   done
   printf "\n"
 
-  if navicat_running; then
-    rm -rf "$keep_dir"
-    die "$(fmt "$L_NAVICAT_STILL_RUNNING" "$0")"
+  if navicat_window_open; then
+    die "$(fmt "$L_NAVICAT_STILL_RUNNING" "$keep_dir" "$0" "$keep_dir")"
   fi
 
   log "✅ $L_NAVICAT_CLOSED"
