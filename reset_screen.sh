@@ -3,11 +3,12 @@
 # title:         reset_screen.sh
 # description:   临时切换分辨率再恢复，用于让屏幕重新亮起
 # author:        duanluan<duanluan@outlook.com>
-# date:          2026-07-28
-# version:       v2.0
+# date:          2026-08-10
+# version:       v2.1
 # usage:         reset_screen.sh [--self-update] [output]
 #
 # changelog:
+# v2.1 (2026-08-10)：临时分辨率优先匹配当前宽高比，兼容新版 kscreen-doctor 输出格式，恢复后确认原模式并在超时重试，恢复单实例运行锁以避免连续触发保存临时分辨率
 # v2.0 (2026-07-28)：默认临时切换到较低分辨率后恢复，保留 xrandr 与 kscreen-doctor 支持，新增手动自更新能力，移除显示电源开关、关闭显示器输出和虚拟机专用处理
 #===============================================================
 
@@ -38,9 +39,31 @@ OUTPUT=""
 OUTPUT_ARG=""
 TEMP_MODE="${RESET_SCREEN_TEMP_MODE:-}"
 SWITCH_DELAY=1
+RESTORE_POLL_INTERVAL=0.25
+RESTORE_POLL_COUNT=20
 
 has_command() {
   command -v "$1" >/dev/null 2>&1
+}
+
+acquire_run_lock() {
+  local lock_base lock_path
+
+  lock_base="${XDG_RUNTIME_DIR:-/tmp}"
+  if [[ ! -d "$lock_base" || ! -w "$lock_base" ]]; then
+    lock_base="/tmp"
+  fi
+
+  if has_command flock; then
+    lock_path="${lock_base}/reset_screen.$(id -u).lock"
+    exec 9>"$lock_path"
+    flock -n 9
+    return
+  fi
+
+  lock_path="${lock_base}/reset_screen.$(id -u).lockdir"
+  mkdir "$lock_path" 2>/dev/null || return 1
+  trap 'rmdir "$lock_path" 2>/dev/null || true' EXIT
 }
 
 log_update() {
@@ -293,9 +316,37 @@ detect_kscreen_output() {
 
   awk '
     /^Output:/ {
-      if ($0 ~ / enabled / && $0 ~ / connected /) {
-        print $3
+      if (output != "" && enabled && connected) {
+        print output
+        found = 1
         exit
+      }
+      output = $3
+      enabled = ($0 ~ / enabled /)
+      connected = ($0 ~ / connected /)
+      next
+    }
+    $1 == "enabled" {
+      enabled = 1
+      next
+    }
+    $1 == "disabled" {
+      enabled = 0
+      next
+    }
+    $1 == "connected" {
+      connected = 1
+      next
+    }
+    $1 == "disconnected" {
+      connected = 0
+      next
+    }
+    END {
+      if (!found && output != "" && enabled && connected) {
+        print output
+      } else if (!found && output == "") {
+        exit 1
       }
     }
   ' <<<"$info"
@@ -352,7 +403,12 @@ choose_kscreen_temp_mode_id() {
     BEGIN {
       split(current_mode, current_parts, "@")
       split(current_parts[1], current_size, "x")
+      if (current_size[1] <= 0 || current_size[2] <= 0) {
+        exit 1
+      }
       current_area = current_size[1] * current_size[2]
+      current_ratio = current_size[1] / current_size[2]
+      best_ratio_delta = -1
       best_area = 0
     }
     /^Output:/ {
@@ -374,7 +430,14 @@ choose_kscreen_temp_mode_id() {
 
         split(mode, parts, "@")
         split(parts[1], size, "x")
+        if (size[1] <= 0 || size[2] <= 0) {
+          continue
+        }
         area = size[1] * size[2]
+        ratio_delta = (size[1] / size[2]) - current_ratio
+        if (ratio_delta < 0) {
+          ratio_delta = -ratio_delta
+        }
 
         if (requested != "") {
           if (requested == id || requested == mode || requested == parts[1]) {
@@ -383,9 +446,13 @@ choose_kscreen_temp_mode_id() {
           continue
         }
 
-        if (mode != current_mode && area < current_area && area > best_area) {
-          best = id
-          best_area = area
+        if (mode != current_mode && area < current_area) {
+          if (best_ratio_delta < 0 || ratio_delta < best_ratio_delta - 0.000001 ||
+              (ratio_delta <= best_ratio_delta + 0.000001 && area > best_area)) {
+            best = id
+            best_ratio_delta = ratio_delta
+            best_area = area
+          }
         }
       }
     }
@@ -433,7 +500,40 @@ reset_with_kscreen() {
 
   kscreen-doctor "${temp_args[@]}" >/dev/null
   sleep "$SWITCH_DELAY"
-  kscreen-doctor "${restore_args[@]}" >/dev/null
+  restore_kscreen_mode "$selected_output" "$current_mode_id" "${restore_args[@]}"
+}
+
+wait_for_kscreen_mode() {
+  local output="$1"
+  local expected_mode_id="$2"
+  local attempt info current_info current_mode_id
+
+  for ((attempt = 0; attempt < RESTORE_POLL_COUNT; attempt++)); do
+    info="$(kscreen_info || true)"
+    current_info="$(get_kscreen_current_mode_info "$info" "$output" || true)"
+    read -r current_mode_id _ <<<"$current_info"
+    if [[ "$current_mode_id" == "$expected_mode_id" ]]; then
+      return 0
+    fi
+    ((attempt + 1 < RESTORE_POLL_COUNT)) && sleep "$RESTORE_POLL_INTERVAL"
+  done
+
+  return 1
+}
+
+restore_kscreen_mode() {
+  local output="$1"
+  local expected_mode_id="$2"
+  shift 2
+
+  kscreen-doctor "$@" >/dev/null 2>&1 || true
+  if wait_for_kscreen_mode "$output" "$expected_mode_id"; then
+    return 0
+  fi
+
+  kscreen-doctor "$@" >/dev/null 2>&1 || true
+  printf '恢复原分辨率超时：未确认输出 %s 恢复到模式 %s。\n' "$output" "$expected_mode_id" >&2
+  return 2
 }
 
 detect_xrandr_output() {
@@ -500,7 +600,12 @@ choose_xrandr_temp_mode() {
   awk -v output="$output" -v current_mode="$current_mode" '
     BEGIN {
       split(current_mode, current_size, "x")
+      if (current_size[1] <= 0 || current_size[2] <= 0) {
+        exit 1
+      }
       current_area = current_size[1] * current_size[2]
+      current_ratio = current_size[1] / current_size[2]
+      best_ratio_delta = -1
       best_area = 0
     }
     $1 == output && $2 == "connected" {
@@ -513,10 +618,21 @@ choose_xrandr_temp_mode() {
     active && /^[[:space:]]+[0-9]+x[0-9]+/ {
       mode = $1
       split(mode, size, "x")
+      if (size[1] <= 0 || size[2] <= 0) {
+        next
+      }
       area = size[1] * size[2]
-      if (mode != current_mode && area < current_area && area > best_area) {
-        best = mode
-        best_area = area
+      ratio_delta = (size[1] / size[2]) - current_ratio
+      if (ratio_delta < 0) {
+        ratio_delta = -ratio_delta
+      }
+      if (mode != current_mode && area < current_area) {
+        if (best_ratio_delta < 0 || ratio_delta < best_ratio_delta - 0.000001 ||
+            (ratio_delta <= best_ratio_delta + 0.000001 && area > best_area)) {
+          best = mode
+          best_ratio_delta = ratio_delta
+          best_area = area
+        }
       }
     }
     END {
@@ -566,7 +682,42 @@ reset_with_xrandr() {
 
   apply_xrandr_mode "$selected_output" "$temp_mode" "$xpos" "$ypos" "$primary"
   sleep "$SWITCH_DELAY"
-  apply_xrandr_mode "$selected_output" "$current_mode" "$xpos" "$ypos" "$primary"
+  restore_xrandr_mode "$selected_output" "$current_mode" "$xpos" "$ypos" "$primary"
+}
+
+wait_for_xrandr_mode() {
+  local output="$1"
+  local expected_mode="$2"
+  local attempt query state current_mode
+
+  for ((attempt = 0; attempt < RESTORE_POLL_COUNT; attempt++)); do
+    query="$(xrandr --query 2>/dev/null || true)"
+    state="$(get_xrandr_state "$query" "$output" || true)"
+    read -r current_mode _ <<<"$state"
+    if [[ "$current_mode" == "$expected_mode" ]]; then
+      return 0
+    fi
+    ((attempt + 1 < RESTORE_POLL_COUNT)) && sleep "$RESTORE_POLL_INTERVAL"
+  done
+
+  return 1
+}
+
+restore_xrandr_mode() {
+  local output="$1"
+  local mode="$2"
+  local xpos="$3"
+  local ypos="$4"
+  local primary="$5"
+
+  apply_xrandr_mode "$output" "$mode" "$xpos" "$ypos" "$primary" || true
+  if wait_for_xrandr_mode "$output" "$mode"; then
+    return 0
+  fi
+
+  apply_xrandr_mode "$output" "$mode" "$xpos" "$ypos" "$primary" || true
+  printf '恢复原分辨率超时：未确认输出 %s 恢复到模式 %s。\n' "$output" "$mode" >&2
+  return 2
 }
 
 main() {
@@ -581,12 +732,32 @@ main() {
     check_self_update "false" "$@"
   fi
 
+  acquire_run_lock || return 0
+
+  local reset_status
+
   if prefer_kscreen; then
-    reset_with_kscreen && return 0
-    reset_with_xrandr && return 0
+    if reset_with_kscreen; then
+      return 0
+    fi
+    reset_status=$?
+    ((reset_status == 2)) && return "$reset_status"
+    if reset_with_xrandr; then
+      return 0
+    fi
+    reset_status=$?
+    ((reset_status == 2)) && return "$reset_status"
   else
-    reset_with_xrandr && return 0
-    reset_with_kscreen && return 0
+    if reset_with_xrandr; then
+      return 0
+    fi
+    reset_status=$?
+    ((reset_status == 2)) && return "$reset_status"
+    if reset_with_kscreen; then
+      return 0
+    fi
+    reset_status=$?
+    ((reset_status == 2)) && return "$reset_status"
   fi
 
   echo "无法临时切换分辨率：请确认 kscreen-doctor 或 xrandr 可用，并且当前显示器有可切换的较低分辨率。" >&2

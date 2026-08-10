@@ -289,7 +289,9 @@ Get-ScheduledTask -TaskName "Codex Headroom Port Monitor"
   - 额外导出一份 jar：`bash ./prepare-jetbrains-zh-plugin.sh --jb /path/to/idea --ide rebased --output ~/Downloads/localization-zh.jar`
 
 ### `reset_screen.sh`
-- 功能：临时切到一个较低分辨率，等待后恢复原分辨率，用于让屏幕重新亮起。
+- 功能：临时切到一个宽高比接近的较低分辨率，等待后恢复原分辨率，用于让屏幕重新亮起。
+- 恢复原模式后会等待显示状态确认，最多等待 5 秒；超时会重试一次并返回失败。
+- 连续触发时只允许一个实例修改显示配置，后启动的实例会静默退出。
 - 默认自动选择当前已启用且已连接的输出口；KDE/Wayland 优先使用 `kscreen-doctor`，其他 X11 环境优先使用 `xrandr`。
 - 可通过第一个参数或 `RESET_SCREEN_OUTPUT` 指定输出口：`./reset_screen.sh HDMI-0`、`RESET_SCREEN_OUTPUT=HDMI-A-0 ./reset_screen.sh`。
 - 可通过 `RESET_SCREEN_TEMP_MODE` 指定临时分辨率：`RESET_SCREEN_TEMP_MODE=2560x1440@59.95 ./reset_screen.sh`。
