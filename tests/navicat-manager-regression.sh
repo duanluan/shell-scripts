@@ -53,6 +53,9 @@ EOF
 
   cat >"$fake_bin/pkill" <<'EOF'
 #!/bin/bash
+if [[ "${NAVICAT_TEST_PKILL_KEEPS_WINDOW:-0}" != "1" ]]; then
+  rm -f "$NAVICAT_TEST_STATE/window-open"
+fi
 exit 0
 EOF
 
@@ -76,6 +79,10 @@ count=$((count + 1))
 printf '%s\n' "$count" >"$count_file"
 
 if [[ "$count" -eq 1 ]]; then
+  if [[ "${NAVICAT_TEST_INTERRUPT_ON_SLEEP:-0}" == "1" ]]; then
+    kill -INT "$PPID"
+    exit 0
+  fi
   mkdir -p "$(dirname -- "$NAVICAT_TEST_PREF")"
   printf '%s\n' '{"CloudSessions":[],"CloudSessions_SimpChinese":[],"Continues":{}}' >"$NAVICAT_TEST_PREF"
   touch "$NAVICAT_TEST_STATE/window-open"
@@ -89,7 +96,9 @@ EOF
 
 run_reset_case() {
   local keep_window=$1
-  local work_dir fake_bin config_dir backup_dir state_dir output status
+  local window_open_before_reset=${2:-0}
+  local interrupt_on_sleep=${3:-0}
+  local work_dir fake_bin config_dir backup_dir state_dir expected_pref output status
 
   work_dir=$(mktemp -d)
   TEMP_DIRS+=("$work_dir")
@@ -97,13 +106,22 @@ run_reset_case() {
   config_dir="$work_dir/navicat"
   backup_dir="$work_dir/backups"
   state_dir="$work_dir/state"
+  expected_pref="$work_dir/expected-preferences.json"
   mkdir -p "$state_dir"
   create_config "$config_dir"
+  cp "$config_dir/Premium/preferences.json" "$expected_pref"
   create_reset_fakes "$fake_bin"
+  if [[ "$window_open_before_reset" -eq 1 ]]; then
+    touch "$state_dir/window-open"
+  fi
 
   set +e
   output=$(
-    printf 'y\nN\n' |
+    if [[ "$window_open_before_reset" -eq 1 ]]; then
+      printf 'y\ny\nN\n'
+    else
+      printf 'y\nN\n'
+    fi |
       env \
         HOME="$work_dir/home" \
         LC_ALL=C \
@@ -112,6 +130,7 @@ run_reset_case() {
         NAVICAT_TEST_PREF="$config_dir/Premium/preferences.json" \
         NAVICAT_TEST_STATE="$state_dir" \
         NAVICAT_TEST_KEEP_WINDOW="$keep_window" \
+        NAVICAT_TEST_INTERRUPT_ON_SLEEP="$interrupt_on_sleep" \
         PATH="$fake_bin:/usr/bin:/bin" \
         "$SCRIPT_UNDER_TEST" reset --config-dir "$config_dir" --backup-root "$backup_dir" 2>&1
   )
@@ -120,6 +139,11 @@ run_reset_case() {
 
   printf '%s\n' "$status"
   printf '%s' "$output"
+  printf '\nRESTORED_CONNECTIONS=%s\n' "$(jq '[.Users[]?.Projects[]?.Servers[]?] | length' "$config_dir/Common/connections.json")"
+  printf 'RESTORED_CLOUD_SESSIONS=%s\n' "$(jq '.CloudSessions | length' "$config_dir/Premium/preferences.json")"
+  if [[ "$interrupt_on_sleep" -eq 1 ]] && cmp -s "$config_dir/Premium/preferences.json" "$expected_pref"; then
+    printf 'RESTORED_PREFERENCES_EXACT=1\n'
+  fi
 }
 
 test_self_update_continues_original_args() {
@@ -192,6 +216,37 @@ test_reset_continues_after_window_closes() {
   [[ "$status" -eq 0 ]] || fail "reset exited with $status: $output"
   assert_contains "Reset finished." "$output"
   assert_contains "Navicat windows closed; restoring config." "$output"
+  assert_contains "RESTORED_CONNECTIONS=1" "$output"
+  assert_contains "RESTORED_CLOUD_SESSIONS=1" "$output"
+}
+
+test_reset_can_auto_close_window_before_reset() {
+  local result status output
+
+  result=$(run_reset_case 0 1)
+  status=$(printf '%s\n' "$result" | sed -n '1p')
+  output=$(printf '%s\n' "$result" | sed -n '2,$p')
+
+  [[ "$status" -eq 0 ]] || fail "reset could not auto-close the initial window: $output"
+  assert_contains "Closing Navicat..." "$output"
+  assert_contains "Reset finished." "$output"
+  assert_contains "RESTORED_CONNECTIONS=1" "$output"
+  assert_contains "RESTORED_CLOUD_SESSIONS=1" "$output"
+}
+
+test_reset_interrupt_restores_original_config() {
+  local result status output
+
+  result=$(run_reset_case 0 0 1)
+  status=$(printf '%s\n' "$result" | sed -n '1p')
+  output=$(printf '%s\n' "$result" | sed -n '2,$p')
+
+  [[ "$status" -eq 130 ]] || fail "interrupted reset exited with $status: $output"
+  assert_contains "Reset interrupted. Restoring the pre-reset config..." "$output"
+  assert_contains "Pre-reset config restored." "$output"
+  assert_contains "RESTORED_CONNECTIONS=1" "$output"
+  assert_contains "RESTORED_CLOUD_SESSIONS=1" "$output"
+  assert_contains "RESTORED_PREFERENCES_EXACT=1" "$output"
 }
 
 test_reset_timeout_keeps_recovery_copy() {
@@ -226,6 +281,7 @@ test_reset_timeout_keeps_recovery_copy() {
 
   [[ "$status" -ne 0 ]] || fail "reset timeout unexpectedly succeeded"
   assert_contains "Original config is kept at:" "$output"
+  assert_contains "Restore it with:" "$output"
   recovery_dir=$(find "$backup_dir" -mindepth 1 -maxdepth 1 -type d -name 'reset-preserve-*' | head -n 1)
   [[ -n "$recovery_dir" ]] || fail "reset recovery copy was not retained"
   [[ "$(jq '.CloudSessions | length' "$recovery_dir/navicat/Premium/preferences.json")" -eq 1 ]] || fail "cloud session was not preserved"
@@ -234,5 +290,7 @@ test_reset_timeout_keeps_recovery_copy() {
 
 test_self_update_continues_original_args
 test_reset_continues_after_window_closes
+test_reset_can_auto_close_window_before_reset
+test_reset_interrupt_restores_original_config
 test_reset_timeout_keeps_recovery_copy
 printf 'navicat-manager regression tests passed\n'
