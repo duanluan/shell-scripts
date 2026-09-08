@@ -3,9 +3,13 @@
 # title:         activate-wechat.sh
 # description:   激活托盘区和任务栏的微信主窗口 (支持 X11 & Wayland)
 # author:        duanluan<duanluan@outlook.com>
-# date:          2025-12-13
-# version:       v1.4
+# date:          2026-09-08
+# version:       v1.5
 # changelog:
+#   v1.5:
+#     - Wayland/XWayland 下优先直接置前已发现的微信窗口
+#     - 修复 KDE 启动器继承文件锁导致脚本静默退出的问题
+#     - 增加托盘激活后的窗口置前回退流程
 #   v1.4:
 #     - 新增文件锁 (flock) 机制，防止快捷键连按导致并发运行冲突
 #     - 修复非终端环境下无 pkexec 且 sudo 需要密码时的死锁问题
@@ -31,12 +35,12 @@
 LOCK_FILE="/tmp/activate-wechat-${USER}.lock"
 # 打开文件描述符 200 到锁文件
 exec 200>"$LOCK_FILE"
-# 尝试获取排他锁 (-x)，非阻塞模式 (-n)
-# 如果获取失败（即已有实例在运行），则直接退出
-flock -x -n 200 || {
-    # 这里不需要弹出提示，直接静默退出即可，避免弹出一堆窗口骚扰用户
-    exit 0
-}
+# 尝试获取排他锁 (-x)，非阻塞模式 (-n)。锁失败时必须给出原因，
+# 否则 GUI/快捷键调用看起来像脚本完全没有执行。
+if ! flock -x -n 200; then
+  echo "⚠️ 微信激活脚本已有实例运行，跳过本次请求。" >&2
+  exit 0
+fi
 
 # ===============================================================
 # 🟢 脚本主逻辑开始
@@ -167,11 +171,23 @@ check_and_install() {
   fi
 }
 
-# 执行所有依赖检查
+# 执行所有必需依赖检查
 # 命令 | Debian/Ubuntu 包 | Arch 包 | Fedora/RHEL 包
 check_and_install "dbus-send" "dbus" "dbus" "dbus-tools"
 check_and_install "qdbus" "qt5-qdbus-bin" "qt5-tools" "qt5-qttools"
 check_and_install "wmctrl" "wmctrl" "wmctrl" "wmctrl"
+
+# 🖥️ 检测显示服务类型 (X11 or Wayland)
+SESSION_TYPE="${XDG_SESSION_TYPE:-x11}"
+echo "ℹ️ 检测到会话类型: $SESSION_TYPE"
+
+# KDE Wayland 下优先使用 kdotool（可选，通常来自 AUR/第三方仓库）。
+# 没有它时仍尝试通过 XWayland 的 wmctrl 激活窗口。
+if [[ "$SESSION_TYPE" == "wayland" && "$XDG_CURRENT_DESKTOP" == *KDE* ]] && command -v kdotool >/dev/null 2>&1; then
+  WINDOW_ACTIVATOR="kdotool"
+else
+  WINDOW_ACTIVATOR="wmctrl"
+fi
 
 # 是否安装 Linux 版微信
 if [ ! -x "$WECHAT_PATH" ]; then
@@ -186,11 +202,6 @@ if [ -z "$wechat_pid" ]; then
   exit 1
 fi
 
-# 🖥️ 检测显示服务类型 (X11 or Wayland)
-# 默认设为 x11 以防变量为空
-SESSION_TYPE="${XDG_SESSION_TYPE:-x11}"
-echo "ℹ️ 检测到会话类型: $SESSION_TYPE"
-
 # 🚀 检查微信窗口是否已在任务栏 (核心修改)
 # 逻辑：
 # 1. 无论是 X11 还是 Wayland，微信通常通过 XWayland 运行。
@@ -204,33 +215,16 @@ echo "ℹ️ 检测到会话类型: $SESSION_TYPE"
 window_id=$(wmctrl -l -p | awk -v pid="$wechat_pid" '$3 == pid {print $1}' | head -n1)
 
 if [ -n "$window_id" ]; then
-  echo "ℹ️ 发现微信窗口 ($window_id) 存在于任务栏/桌面，正在尝试先关闭..."
+  echo "ℹ️ 发现微信窗口 ($window_id)，直接请求置前..."
 
-  # 针对 Wayland 的额外日志
-  if [[ "$SESSION_TYPE" == "wayland" ]]; then
-    echo "   (Wayland 模式下，依赖 XWayland 支持来操作窗口)"
+  # 窗口已经由 XWayland 暴露时，直接激活最可靠。
+  # 先关闭再从托盘恢复会丢失 Wayland/XWayland 的激活上下文。
+  if wmctrl -i -a "$window_id" 2>/dev/null; then
+    echo "✅ 微信窗口已置前。"
+    exit 0
   fi
 
-  # -i 通过窗口 ID 操作, -c 关闭窗口 (微信会最小化到托盘)
-  wmctrl -i -c "$window_id"
-
-  # 🚀 智能等待窗口关闭 (v1.4 修改)
-  # 之前版本使用硬编码 sleep 0.2，可能导致慢机器激活失败或快机器浪费时间。
-  # 现在使用轮询检测：只要窗口 ID 还在，就继续等，直到超时 (2秒)。
-  echo "⏳ 等待窗口最小化..."
-  wait_count=0
-  timeout=20 # 20 * 0.1s = 2s
-
-  while wmctrl -l -p | grep -q "$window_id"; do
-    if [ "$wait_count" -ge "$timeout" ]; then
-      echo "⚠️ 等待窗口关闭超时，将尝试强制激活..."
-      break
-    fi
-    sleep 0.1
-    wait_count=$((wait_count + 1))
-  done
-
-# 如果循环提前结束，说明窗口已关闭，可以立即进行下一步
+  echo "⚠️ 直接置前失败，将尝试从托盘激活。"
 else
   echo "ℹ️ 微信窗口未在任务栏找到 (或已最小化/Wayland限制)，将直接从托盘激活。"
 fi
@@ -248,12 +242,76 @@ for item in $items; do
     found=1
     # 获取项目名称 (去掉路径前缀)
     item_name=$(echo "$item" | cut -d'/' -f1)
-    echo "🚀 OK! 正在发送 D-Bus Activate 信号: $item_name"
+    # KDE 在真实托盘点击时会传入鼠标坐标；部分微信版本在 (0,0) 下只更新任务栏高亮。
+    # 尽量取得当前指针位置，取不到时使用屏幕左上角作为兼容回退。
+    click_x=0
+    click_y=0
+    if command -v xdotool >/dev/null 2>&1; then
+      mouse_location=$(xdotool getmouselocation --shell 2>/dev/null || true)
+      click_x=$(printf '%s\n' "$mouse_location" | awk -F= '$1 == "X" {print $2}')
+      click_y=$(printf '%s\n' "$mouse_location" | awk -F= '$1 == "Y" {print $2}')
+      [[ "$click_x" =~ ^[0-9]+$ ]] || click_x=0
+      [[ "$click_y" =~ ^[0-9]+$ ]] || click_y=0
+    fi
+    echo "🚀 OK! 正在发送 D-Bus Activate 信号: $item_name (${click_x},${click_y})"
 
-    # 激活微信主窗口
-    # method_call Activate int32:x int32:y
-    # 参数 0 0 代表点击坐标，通常传 0 即可
-    dbus-send --session --type=method_call --dest="$item_name" /StatusNotifierItem org.kde.StatusNotifierItem.Activate int32:0 int32:0
+    # 这就是 KDE 托盘左键点击对应的标准调用；使用真实坐标兼容依赖点击位置的微信版本。
+    if ! dbus-send --session --type=method_call --dest="$item_name" \
+      /StatusNotifierItem org.kde.StatusNotifierItem.Activate \
+      int32:"$click_x" int32:"$click_y"; then
+      echo "⚠️ 托盘 Activate 调用失败。"
+    fi
+
+    # 托盘 Activate 只表示“请求显示”，Wayland 下不一定会把窗口置前。
+    # 微信窗口重新出现后，再通过 KDE 的 kdotool 或 XWayland wmctrl 显式激活。
+    echo "⏳ 等待微信窗口重新出现并尝试置前..."
+    activated=0
+    for _ in {1..20}; do
+      if [[ "$WINDOW_ACTIVATOR" == "kdotool" ]]; then
+        window_id=$(kdotool search --pid "$wechat_pid" 2>/dev/null | head -n1)
+        if [[ -n "$window_id" ]] && kdotool windowactivate "$window_id" 2>/dev/null; then
+          activated=1
+          break
+        fi
+      else
+        window_id=$(wmctrl -l -p 2>/dev/null | awk -v pid="$wechat_pid" '$3 == pid {print $1; exit}')
+        if [[ -n "$window_id" ]] && wmctrl -i -a "$window_id" 2>/dev/null; then
+          activated=1
+          break
+        fi
+      fi
+      sleep 0.1
+    done
+
+    # 原生 Wayland 窗口可能完全不会出现在 wmctrl 中。KDE 的启动协议
+    # 会把请求交给已有的单实例应用，比直接操作 X11 窗口更接近点击应用图标。
+    if [[ "$activated" -eq 0 && "$SESSION_TYPE" == "wayland" ]]; then
+      kde_launcher=""
+      if command -v kstart6 >/dev/null 2>&1; then
+        kde_launcher="kstart6"
+      elif command -v kstart5 >/dev/null 2>&1; then
+        kde_launcher="kstart5"
+      fi
+      if [[ -n "$kde_launcher" && -f /usr/share/applications/wechat.desktop ]]; then
+        echo "ℹ️ 窗口未被窗口工具发现，改用 KDE 应用启动协议激活已有微信实例..."
+        "$kde_launcher" --application wechat.desktop 200>/dev/null >/dev/null 2>&1 &
+        for _ in {1..10}; do
+          sleep 0.1
+          window_id=$(wmctrl -l -p 2>/dev/null | awk -v pid="$wechat_pid" '$3 == pid {print $1; exit}')
+          if [[ -n "$window_id" ]]; then
+            wmctrl -i -a "$window_id" 2>/dev/null || true
+            activated=1
+            break
+          fi
+        done
+      fi
+    fi
+
+    if [[ "$activated" -eq 1 ]]; then
+      echo "✅ 已请求将微信窗口置前。"
+    else
+      echo "⚠️ 未找到可置前的微信窗口；KDE/微信可能未提供可脚本化的激活接口。"
+    fi
     break
   fi
 done
