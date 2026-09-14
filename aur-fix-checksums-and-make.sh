@@ -3,11 +3,12 @@
 # title:         aur-fix-checksums-and-make.sh
 # description:   自动修复 AUR source 校验值并继续执行 makepkg
 # author:        duanluan<duanluan@outlook.com>
-# date:          2026-04-02
-# version:       v1.0
+# date:          2026-09-14
+# version:       v1.1
 # usage:         aur-fix-checksums-and-make [pkgname|pkgbuild_dir] [makepkg_args...]
 #
 # changelog:
+#   v1.1 (2026-09-14)：缺失依赖时交互确认后自动安装 (pacman -S --needed)，非交互环境输出手动安装提示
 #   v1.0 (2026-04-02)：支持自动修复校验值、自更新、paru/yay 缓存目录解析、重复目录交互选择，以及无需修改时的构建确认
 #===============================================================
 
@@ -28,6 +29,10 @@ if [[ "${LANG:-}" == *"zh_"* ]]; then
   L_ERR_NO_PKG="错误：当前目录没有 PKGBUILD，也没有传入可用目录。"
   L_HINT_PARU="提示：也可以直接传包名，例如：aur-fix-checksums-and-make visual-studio-code-bin"
   L_ERR_DEP="错误：缺少依赖工具：%s"
+  L_ASK_INSTALL_DEPS="是否自动安装缺失依赖 (%s)？[y/N]："
+  L_DEP_INSTALL_FAIL="错误：依赖安装失败。"
+  L_DEP_STILL_MISSING="错误：安装后仍未找到命令：%s"
+  L_DEP_INSTALL_HINT="提示：请手动安装：sudo pacman -S --needed %s"
   L_MULTI_FOUND="检测到多个缓存目录，请选择："
   L_MULTI_PROMPT="请输入序号 [1-%d]："
   L_MULTI_INVALID="错误：无效选择：%s"
@@ -57,6 +62,10 @@ else
   L_ERR_NO_PKG="Error: no PKGBUILD found in the current directory and no valid directory was provided."
   L_HINT_PARU="Hint: you can also pass the package name directly, for example: aur-fix-checksums-and-make visual-studio-code-bin"
   L_ERR_DEP="Error: missing dependency: %s"
+  L_ASK_INSTALL_DEPS="Install missing dependencies (%s) automatically? [y/N]: "
+  L_DEP_INSTALL_FAIL="Error: dependency installation failed."
+  L_DEP_STILL_MISSING="Error: command still not found after installation: %s"
+  L_DEP_INSTALL_HINT="Hint: install manually: sudo pacman -S --needed %s"
   L_MULTI_FOUND="Multiple cache directories were found. Choose one:"
   L_MULTI_PROMPT="Enter a number [1-%d]: "
   L_MULTI_INVALID="Error: invalid selection: %s"
@@ -99,11 +108,53 @@ get_script_path() {
 
 SCRIPT_PATH="$(get_script_path)"
 
-require_command() {
-  if ! command -v "$1" >/dev/null 2>&1; then
-    printf '%s\n' "$(printf "$L_ERR_DEP" "$1")" >&2
-    exit 1
+declare -A DEP_CMD_PACKAGES=(
+  [makepkg]="pacman"
+  [updpkgsums]="pacman-contrib"
+)
+
+ensure_dependencies() {
+  local missing_cmds=() missing_pkgs=() cmd="" reply="" install_cmd=""
+
+  for cmd in makepkg updpkgsums; do
+    command -v "$cmd" >/dev/null 2>&1 || missing_cmds+=("$cmd")
+  done
+
+  [[ ${#missing_cmds[@]} -eq 0 ]] && return 0
+
+  for cmd in "${missing_cmds[@]}"; do
+    printf '%s\n' "$(printf "$L_ERR_DEP" "$cmd")" >&2
+    missing_pkgs+=("${DEP_CMD_PACKAGES[$cmd]}")
+  done
+
+  if [[ -t 0 ]] && command -v pacman >/dev/null 2>&1; then
+    if [[ $EUID -eq 0 ]]; then
+      install_cmd="pacman"
+    elif command -v sudo >/dev/null 2>&1; then
+      install_cmd="sudo pacman"
+    fi
   fi
+
+  if [[ -n "$install_cmd" ]]; then
+    read -r -p "$(printf "$L_ASK_INSTALL_DEPS" "${missing_pkgs[*]}")" reply
+    if [[ "$reply" =~ ^[Yy]$ ]]; then
+      if ! $install_cmd -S --needed --noconfirm "${missing_pkgs[@]}"; then
+        printf '%s\n' "$L_DEP_INSTALL_FAIL" >&2
+        exit 1
+      fi
+      for cmd in "${missing_cmds[@]}"; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+          printf '%s\n' "$(printf "$L_DEP_STILL_MISSING" "$cmd")" >&2
+          exit 1
+        fi
+      done
+      return 0
+    fi
+    printf '%s\n' "$L_ABORT_USER" >&2
+  fi
+
+  printf "$L_DEP_INSTALL_HINT" "${missing_pkgs[*]}" >&2
+  exit 1
 }
 
 confirm_build_if_needed() {
@@ -301,8 +352,7 @@ if [[ ! -f PKGBUILD ]]; then
   exit 1
 fi
 
-require_command makepkg
-require_command updpkgsums
+ensure_dependencies
 
 verify_log="$(mktemp)"
 reverify_log="$(mktemp)"
