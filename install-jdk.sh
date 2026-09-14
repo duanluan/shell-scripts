@@ -1,37 +1,45 @@
 #!/bin/bash
-
-# ==============================================================================
-# Multi-distribution JDK Installer (Azul Zulu / Alibaba Dragonwell)
+#===============================================================
+# title:         install-jdk.sh
+# description:   Interactively install Azul Zulu / Alibaba Dragonwell JDKs
+#                with per-distro version menus, LTS tags, install registry
+#                update checks and optional stable jdk<major> symlinks
+# author:        duanluan<duanluan@outlook.com>
+# date:          2026-09-14
+# version:       v1.0
+# usage:         install-jdk.sh [--self-update]
 #
-# Logic:
-# 1. Check deps -> auto-install via detected package manager
-#    (apt-get / dnf / yum / zypper / pacman / apk).
-# 2. Configure install dir + JAVA_HOME scope (system / current user / skip).
-#    User-writable dirs install without root.
-# 3. Select distribution & version. Arch is auto-detected (x64 / aarch64 /
-#    riscv64, musl builds preferred on Alpine). Version menus are newest
-#    major first and driven by live data:
-#      - Zulu: Azul metadata API (api.azul.com). Majors come from one broad
-#        "latest" query plus legacy probes (7/8/11), then the newest CA GA
-#        JDK tarball is picked by name pattern (CRaC / fx / JRE excluded).
-#      - Dragonwell: https://dragonwell-jdk.io/releases.json
-#        ({ oss|github -> extended|standard -> versionNN / xurl / aurl / ... });
-#        lines with version "0" are unpublished and skipped.
-# 4. Update check against ${INSTALL_DIR}/.install-jdk.db: already latest ->
-#    ask to skip/reinstall; older install found -> update, optionally remove
-#    the old directory afterwards.
-# 5. Download -> extract into INSTALL_DIR (only the exact target dir is
-#    replaced; other versions coexist; Zulu dirs are offered a rename that
-#    drops the '-linux_*' suffix, default yes) -> optional stable symlink
-#    jdk<major> that keeps JAVA_HOME valid across updates -> configure env.
-#    Also cleans up the lines the 2022 version of this script appended to
-#    /etc/profile, with a backup first.
+# description_zh:
+#   交互式安装多发行版 JDK（Zulu 优先 / Dragonwell）：依赖按六种包管理器
+#   自动安装、架构与 musl 识别、大版本倒序菜单并标注 LTS、安装登记表
+#   （已是最新询问重装 / 旧版本走更新并可清理旧目录）、Zulu 目录去
+#   -linux_* 后缀、jdk<大版本> 稳定软链接、JAVA_HOME 三种配置范围。
+#   运行 --self-update 强制更新脚本自身；平时每次运行静默检查（每日一次）。
 #
-# Overridable for testing: INSTALL_DIR (prompt default), PROFILE_D, RC_FILE,
-# ETC_PROFILE, DB_FILE, SUDO ("" disables privilege escalation entirely).
-# ==============================================================================
+# changelog:
+#   v1.0 (2026-09-14)：由 install-jdk-dragonwell.sh 重构而来：支持 Zulu
+#                     （Azul Metadata API）、安装登记表更新检查、LTS 标注、
+#                     稳定软链接、目录重命名、脚本自更新
+#===============================================================
 
 set -euo pipefail
+
+# Testing overrides (all optional): INSTALL_DIR (prompt default), PROFILE_D,
+# RC_FILE, ETC_PROFILE, DB_FILE, SUDO ("" disables privilege escalation),
+# INSTALL_JDK_UPDATE_URL (self-update source), INSTALL_JDK_SKIP_SELF_UPDATE=1.
+SCRIPT_PATH="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/$(basename -- "${BASH_SOURCE[0]}")"
+UPDATE_SOURCE_URL="${INSTALL_JDK_UPDATE_URL:-https://raw.githubusercontent.com/duanluan/shell-scripts/refs/heads/main/install-jdk.sh}"
+LAST_CHECK_FILE="$HOME/.cache/install-jdk.last_check"
+CHECK_COOLDOWN=86400
+
+# mirror-first download candidates for self-update (same set as the other
+# scripts in this repo)
+declare -a UPDATE_PROXIES=(
+  "prefix:https://gh-proxy.com/"
+  "prefix:https://ghproxy.net/"
+  "prefix:https://ghfast.top/"
+  "prefix:https://fastgit.cc/"
+)
 
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
@@ -90,6 +98,23 @@ L_VERIFY=">>> [8/8] Installed. Verify:"
 L_DONE="Done."
 L_RELOGIN_HINT="Run 'source %s' or re-login, then 'java -version' will use the new JDK."
 L_MANUAL_ENV="Add these lines to your shell profile if needed:"
+L_SELF_UPDATE_CHECKING="Checking for script updates..."
+L_SELF_UPDATE_FETCH="Fetching update: %s"
+L_SELF_UPDATE_DOWNLOAD_FAILED="Update check failed: script download failed."
+L_SELF_UPDATE_INVALID_SCRIPT="Update check failed: downloaded file is not install-jdk.sh."
+L_SELF_UPDATE_PARSE_FAILED="Update check failed: remote version was not found."
+L_SELF_UPDATE_CURRENT_VERSION="Local version: %s"
+L_SELF_UPDATE_NEW_VERSION="New version found: %s (current: %s)"
+L_SELF_UPDATE_INSTALLING="Updating script..."
+L_SELF_UPDATE_DONE="Update finished. Rerun the script."
+L_SELF_UPDATE_CONTINUING="Update finished. Continuing with the requested action..."
+L_SELF_UPDATE_RESTART_FAILED="Could not restart updated script: %s"
+L_SELF_UPDATE_LATEST="Already up to date (%s)."
+L_SELF_UPDATE_SKIP_NO_CURL="Skipping update check: curl is not installed."
+L_SELF_UPDATE_SKIP_NO_VERSION="Skipping update check: local version was not found."
+L_SELF_UPDATE_WRITE_FAILED="Cannot write to script path: %s"
+L_SELF_UPDATE_DIRECT="direct"
+L_SELF_UPDATE_CACHE_WRITE_FAILED="Could not write update check cache: %s"
 
 if [[ "${LANG:-}" == *"zh_"* ]]; then
   L_CHECK_DEPS=">>> [0/8] 检查依赖..."
@@ -143,6 +168,23 @@ if [[ "${LANG:-}" == *"zh_"* ]]; then
   L_DONE="完成。"
   L_RELOGIN_HINT="执行 'source %s' 或重新登录后，'java -version' 即为新 JDK。"
   L_MANUAL_ENV="如需手动配置环境变量，可在 shell 配置文件中加入以下两行："
+  L_SELF_UPDATE_CHECKING="正在检查脚本更新..."
+  L_SELF_UPDATE_FETCH="获取更新：%s"
+  L_SELF_UPDATE_DOWNLOAD_FAILED="更新检查失败：脚本下载失败。"
+  L_SELF_UPDATE_INVALID_SCRIPT="更新检查失败：下载的文件不是 install-jdk.sh。"
+  L_SELF_UPDATE_PARSE_FAILED="更新检查失败：未找到远端版本号。"
+  L_SELF_UPDATE_CURRENT_VERSION="本地版本: %s"
+  L_SELF_UPDATE_NEW_VERSION="发现新版本: %s（当前: %s）"
+  L_SELF_UPDATE_INSTALLING="正在更新脚本..."
+  L_SELF_UPDATE_DONE="更新完成，请重新运行脚本。"
+  L_SELF_UPDATE_CONTINUING="更新完成，继续执行原操作..."
+  L_SELF_UPDATE_RESTART_FAILED="无法重启更新后的脚本: %s"
+  L_SELF_UPDATE_LATEST="已是最新版本（%s）。"
+  L_SELF_UPDATE_SKIP_NO_CURL="跳过更新检查：未安装 curl。"
+  L_SELF_UPDATE_SKIP_NO_VERSION="跳过更新检查：未找到本地版本号。"
+  L_SELF_UPDATE_WRITE_FAILED="无法写入脚本路径: %s"
+  L_SELF_UPDATE_DIRECT="直连"
+  L_SELF_UPDATE_CACHE_WRITE_FAILED="无法写入更新检查缓存: %s"
 fi
 
 DRAGONWELL_URL="https://dragonwell-jdk.io/releases.json"
@@ -215,6 +257,160 @@ java_lts_tag() { # $1: major -> "  (LTS)" or empty
     echo "  (LTS)"
   fi
 }
+
+# ==========================================
+# Script self-update (mirror-first, same pattern as navicat-manager.sh)
+# ==========================================
+self_update_log() { echo -e "${BLUE}${1}${NC}"; }
+
+write_update_check_cache() { # $1: current unix time
+  mkdir -p "$(dirname -- "$LAST_CHECK_FILE")" 2>/dev/null || true
+  printf '%s\n' "$1" > "$LAST_CHECK_FILE" 2>/dev/null
+}
+
+current_script_version() {
+  grep -m1 '^# version:' "$SCRIPT_PATH" 2>/dev/null | awk '{print $3}'
+}
+
+remote_candidate_url() {
+  if [ "$1" = "direct" ]; then
+    printf '%s\n' "$UPDATE_SOURCE_URL"
+    return 0
+  fi
+  printf '%s%s\n' "${1#prefix:}" "$UPDATE_SOURCE_URL"
+}
+
+remote_candidate_label() {
+  if [ "$1" = "direct" ]; then
+    printf '%s\n' "$L_SELF_UPDATE_DIRECT"
+  else
+    printf '%s\n' "${1#prefix:}"
+  fi
+}
+
+download_update_script() { # $1: temp file -> 0 on success
+  local entry
+  for entry in "${UPDATE_PROXIES[@]}" direct; do
+    # per-candidate lines are verbose output: only shown for --self-update
+    if [ "${SELF_UPDATE_VERBOSE:-0}" = "1" ]; then
+      self_update_log "$(printf "${L_SELF_UPDATE_FETCH}" "$(remote_candidate_label "$entry")")"
+    fi
+    if curl -fsSL --connect-timeout 10 --max-time 30 -o "$1" "$(remote_candidate_url "$entry")" 2>/dev/null \
+      && [ -s "$1" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+version_gt() { # $1 remote   $2 current -> 1 when remote is newer
+  local remote="${1#v}" current="${2#v}"
+  awk -v r="$remote" -v c="$current" '
+    BEGIN {
+      nr = split(r, rv, /[.-]/)
+      nc = split(c, cv, /[.-]/)
+      max = nr > nc ? nr : nc
+      for (i = 1; i <= max; i++) {
+        a = rv[i] + 0
+        b = cv[i] + 0
+        if (a > b) { print 1; exit }
+        if (a < b) { print 0; exit }
+      }
+      print 0
+    }
+  '
+}
+
+check_self_update() { # $1: force (true/false)   $2...: original args to re-exec
+  local force_check="$1"
+  shift
+  local current_time last_check elapsed current_ver remote_ver tmp_script install_tmp
+
+  [ "$force_check" = "true" ] || [ "${INSTALL_JDK_SKIP_SELF_UPDATE:-0}" != "1" ] || return 0
+
+  current_time="$(date +%s)"
+  if [ "$force_check" != "true" ] && [ -f "$LAST_CHECK_FILE" ]; then
+    last_check="$(cat "$LAST_CHECK_FILE" 2>/dev/null || echo 0)"
+    if [[ "$last_check" =~ ^[0-9]+$ ]]; then
+      elapsed=$((current_time - last_check))
+      [ "$elapsed" -lt "$CHECK_COOLDOWN" ] && return 0 || true
+    fi
+  fi
+
+  if ! command -v curl > /dev/null 2>&1; then
+    [ "$force_check" = "true" ] && die "${L_SELF_UPDATE_SKIP_NO_CURL}" || true
+    return 0
+  fi
+
+  current_ver="$(current_script_version)"
+  if [ -z "$current_ver" ]; then
+    [ "$force_check" = "true" ] && die "${L_SELF_UPDATE_SKIP_NO_VERSION}" || true
+    return 0
+  fi
+
+  self_update_log "${L_SELF_UPDATE_CHECKING}"
+  SELF_UPDATE_VERBOSE=0
+  if [ "$force_check" = "true" ]; then
+    SELF_UPDATE_VERBOSE=1
+    self_update_log "$(printf "${L_SELF_UPDATE_CURRENT_VERSION}" "$current_ver")"
+  fi
+
+  tmp_script="$(mktemp)"
+  if ! download_update_script "$tmp_script"; then
+    rm -f "$tmp_script"
+    write_update_check_cache "$current_time" \
+      || self_update_log "$(printf "${L_SELF_UPDATE_CACHE_WRITE_FAILED}" "$LAST_CHECK_FILE")"
+    [ "$force_check" = "true" ] && die "${L_SELF_UPDATE_DOWNLOAD_FAILED}" || true
+    return 0
+  fi
+
+  write_update_check_cache "$current_time" \
+    || self_update_log "$(printf "${L_SELF_UPDATE_CACHE_WRITE_FAILED}" "$LAST_CHECK_FILE")"
+
+  if ! grep -q '^# title:[[:space:]]*install-jdk.sh' "$tmp_script"; then
+    rm -f "$tmp_script"
+    [ "$force_check" = "true" ] && die "${L_SELF_UPDATE_INVALID_SCRIPT}" || true
+    return 0
+  fi
+
+  remote_ver="$(grep -m1 '^# version:' "$tmp_script" | awk '{print $3}')"
+  if [ -z "$remote_ver" ]; then
+    rm -f "$tmp_script"
+    [ "$force_check" = "true" ] && die "${L_SELF_UPDATE_PARSE_FAILED}" || true
+    return 0
+  fi
+
+  if [ "$(version_gt "$remote_ver" "$current_ver")" = "1" ]; then
+    self_update_log "$(printf "${L_SELF_UPDATE_NEW_VERSION}" "$remote_ver" "$current_ver")"
+    [ -w "$SCRIPT_PATH" ] && [ -w "$(dirname -- "$SCRIPT_PATH")" ] \
+      || die "$(printf "${L_SELF_UPDATE_WRITE_FAILED}" "$SCRIPT_PATH")"
+    self_update_log "${L_SELF_UPDATE_INSTALLING}"
+    install_tmp="$(mktemp "${SCRIPT_PATH}.tmp.XXXXXX")" \
+      || die "$(printf "${L_SELF_UPDATE_WRITE_FAILED}" "$SCRIPT_PATH")"
+    cp "$tmp_script" "$install_tmp"
+    chmod +x "$install_tmp"
+    mv "$install_tmp" "$SCRIPT_PATH"
+    rm -f "$tmp_script"
+    if [ "$force_check" = "true" ]; then
+      self_update_log "${L_SELF_UPDATE_DONE}"
+      exit 0
+    fi
+    self_update_log "${L_SELF_UPDATE_CONTINUING}"
+    INSTALL_JDK_SKIP_SELF_UPDATE=1 exec "$SCRIPT_PATH" "$@"
+    die "$(printf "${L_SELF_UPDATE_RESTART_FAILED}" "$SCRIPT_PATH")"
+  fi
+
+  rm -f "$tmp_script"
+  [ "$force_check" = "true" ] && self_update_log "$(printf "${L_SELF_UPDATE_LATEST}" "$current_ver")" || true
+  return 0
+}
+
+# --- script self-update -------------------------------------------------------
+if [ "${1:-}" = "--self-update" ]; then
+  check_self_update "true"
+  exit 0
+fi
+check_self_update "false" "$@"
 
 # --- [0/8] dependencies -------------------------------------------------------
 echo -e "${BLUE}${L_CHECK_DEPS}${NC}"
