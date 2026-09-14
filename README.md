@@ -13,7 +13,7 @@
 | `github-mirror-axel.sh` | 用镜像包装 `axel` 下载 GitHub 资源 | 通用 Linux | 会创建缓存文件、自我更新 |
 | `github-wrappers.sh` | 包装 `curl`/`wget`，自动改写 GitHub URL | 交互式 shell | 仅当前 shell 生效 |
 | `install-hmcl.sh` | 手动方式安装最新 HMCL 并创建桌面启动器 | Linux 桌面 | 会写 `~/.local/share/hmcl` 和 `.desktop` 文件 |
-| `install-jdk-dragonwell.sh` | 交互式下载并安装 Dragonwell JDK | Debian/RedHat 系 | 会写 `/opt/java`、`/etc/profile` |
+| `install-jdk.sh` | 交互式下载安装 Zulu/Dragonwell JDK，支持已装版本检查与更新 | 通用 Linux（六种包管理器自动装依赖） | 会写 `/opt/java`、`/etc/profile.d`（或用户 rc 文件） |
 | `install-launcherx-bin.sh` | 自动更新并构建 AUR `launcherx-bin` | Arch Linux | 会执行 `makepkg -si` 安装 |
 | `navicat-manager.sh` | 管理 Navicat Linux 配置：备份、恢复、检查和 reset | Linux 桌面 + Navicat 16/17 | 会读写 `~/.config/navicat` 和对应 dconf 项，会创建缓存文件、自我更新 |
 | `prepare-jetbrains-zh-plugin.sh` | 自动为 JetBrains 系 IDE 准备可从磁盘安装的中文语言包 | Linux + JetBrains IDE 安装目录 | 会下载或重打包插件 jar 到本地 |
@@ -201,16 +201,15 @@ Get-ScheduledTask -TaskName "Codex Headroom Port Monitor"
   - 启动参数默认带 `-Dglass.gtk.uiScale=1.5`，可通过环境变量 `HMCL_UI_SCALE` 覆盖。
   - 若本地已是相同版本，交互式终端会询问是否强制重装；非交互式调用会直接退出。
 
-### `install-jdk-dragonwell.sh`
-- 功能：从 Dragonwell 发布 JSON 中读取版本，交互式选择下载包并安装到 `/opt/java`。
-- 关键操作：
-  - 自动安装 `jq`、`wget`（仅内置 Debian/RedHat 分支）。
-  - 清理旧版本目录并解压新包。
-  - 直接修改 `/etc/profile` 中 `JAVA_HOME` 与 `PATH`。
+### `install-jdk.sh`
+- 功能：交互式安装多发行版 JDK（Alibaba Dragonwell / Azul Zulu），自动识别架构（x64/aarch64/riscv64、Alpine musl 优先 musl 构建），并支持已装版本检查与更新。
+- 关键流程：依赖检查（六种包管理器自动安装）-> 配置安装目录与 JAVA_HOME 范围（默认跳过；可选全局 `/etc/profile.d` / 当前用户 rc）-> 选择发行版与版本（菜单按大版本倒序、标注 LTS）-> 对照安装登记表提示已是最新或更新 -> 下载解压 -> 写环境变量。
+- 安装登记：`${INSTALL_DIR}/.install-jdk.db` 记录每个 发行版+大版本 的安装；重装同版本会询问，更新可选删除旧目录。
+- 稳定软链接：可选创建 `${INSTALL_DIR}/jdk<大版本>` 指向实际安装目录（默认创建），环境变量指向软链接时更新后 `JAVA_HOME` 无需修改。
 - 注意事项：
-  - 需要 root 或 sudo（涉及系统目录与 `/etc/profile`）。
-  - 执行前建议备份 `/etc/profile`。
-  - 依赖外网访问：`https://dragonwell-jdk.io/releases.json`。
+  - 安装目录可自选；用户可写目录（如 home 下）全程免 root，系统目录需 sudo。
+  - 会迁移清理 2022 版脚本写入 `/etc/profile` 的 `JAVA_HOME` 行（先备份）。
+  - 依赖外网访问：`https://dragonwell-jdk.io/releases.json`、`https://api.azul.com/metadata/v1/`（Zulu）。
 
 ### `install-launcherx-bin.sh`
 - 功能：自动获取 LauncherX 最新 stable linux-x64 构建，更新 AUR `launcherx-bin` 的 `PKGBUILD` 并安装。
@@ -339,6 +338,6 @@ Get-ScheduledTask -TaskName "Codex Headroom Port Monitor"
 
 ## 安全与维护建议
 
-- 会修改系统文件的脚本请先在测试环境验证：`install-jdk-dragonwell.sh`、`update-github-hosts.sh`。
+- 会修改系统文件的脚本请先在测试环境验证：`install-jdk.sh`、`update-github-hosts.sh`。
 - 会长期驻留/监控的脚本建议使用 `systemd --user` 或 `tmux/screen` 管理：`synology-ignore-monitor.sh`。
 - 与外部接口强绑定的脚本（AUR/API/镜像）可能因上游变更失效，建议定期回归测试。
