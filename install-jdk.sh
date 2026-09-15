@@ -93,6 +93,7 @@ L_NO_VERSION="Error: no release for this source/type/arch."
 L_INVALID_INPUT="Invalid choice, try again."
 L_UPDATE_CHECK=">>> [4/8] Checking installed version..."
 L_INSTALLED_FOUND="Installed on record:"
+L_DB_PRUNE="Recorded directory no longer exists (deleted manually?), dropping from registry:"
 L_ALREADY_LATEST="You already have the latest version (%s)."
 L_ASK_FORCE="Force reinstall? [y/N]: "
 L_ABORT_USER="Aborted by user."
@@ -172,6 +173,7 @@ if [[ "${LANG:-}" == *"zh_"* ]]; then
   L_INVALID_INPUT="输入无效，请重试。"
   L_UPDATE_CHECK=">>> [4/8] 检查已安装版本..."
   L_INSTALLED_FOUND="已有安装记录："
+  L_DB_PRUNE="记录的安装目录已不存在（可能已被手动删除），将从登记表移除："
   L_ALREADY_LATEST="检测到您已经安装了该版本（%s）。"
   L_ASK_FORCE="是否强制重新安装？[y/N]："
   L_ABORT_USER="用户已取消。"
@@ -851,6 +853,24 @@ echo "  -> ${DISTRO_LABEL} ${VERSION} (${TYPE:-JDK ${MAJOR}})  ${ASSET_NAME}"
 
 # --- [4/8] update check against the install registry --------------------------
 echo -e "${BLUE}${L_UPDATE_CHECK}${NC}"
+# drop entries whose install directory was deleted out-of-band (e.g. by hand);
+# write-back only when something actually changed, to leave root-owned files be
+if [ -f "$DB_FILE" ] && [ -r "$DB_FILE" ]; then
+  DB_KEEP="${WORK_DIR}/db.keep"
+  : > "${DB_KEEP}"
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    db_home="$(awk -F'\t' '{print $4}' <<<"$line")"
+    if [ -n "$db_home" ] && [ ! -d "$db_home" ]; then
+      echo -e "${YELLOW}${L_DB_PRUNE} ${db_home}${NC}"
+      continue
+    fi
+    printf '%s\n' "$line" >> "${DB_KEEP}"
+  done < "$DB_FILE"
+  if ! cmp -s "$DB_FILE" "${DB_KEEP}"; then
+    dir_op tee "$DB_FILE" < "${DB_KEEP}" > /dev/null
+  fi
+fi
 DB_LINE=""
 OLD_VERSION=""
 OLD_HOME=""
