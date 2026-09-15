@@ -7,18 +7,21 @@
 #                registry update checks and stable jdk<major> symlinks
 # author:        duanluan<duanluan@outlook.com>
 # date:          2026-09-14
-# version:       v1.1
+# version:       v1.2
 # usage:         install-jdk.sh [--self-update]
 #
 # description_zh:
 #   交互式安装七个发行版的 OpenJDK（Zulu / Temurin / Corretto / Dragonwell /
 #   Liberica / Kona / 毕昇）：依赖按六种包管理器自动安装、架构与 musl 识别、
-#   大版本倒序菜单并标注 LTS、安装登记表（已是最新询问重装 / 旧版本走更新
+#   大版本倒序菜单并标注 LTS、下载后按官方来源校验完整性（API 字段或旁挂
+#   文件，无来源时警告跳过）、安装登记表（已是最新询问重装 / 旧版本走更新
 #   并可清理旧目录）、带平台后缀的目录可选去后缀、jdk<大版本> 稳定软链接、
 #   JAVA_HOME 三种配置范围。
 #   运行 --self-update 强制更新脚本自身；平时每次运行静默检查（每日一次）。
 #
 # changelog:
+#   v1.2 (2026-09-15)：下载后按官方来源校验完整性（sha256/sha1/md5），失配
+#                     即中止；无校验源的发行版（Corretto/Dragonwell）警告跳过
 #   v1.1 (2026-09-14)：新增 Eclipse Temurin、Amazon Corretto、BellSoft
 #                     Liberica、Tencent Kona、毕昇 JDK 五个发行版；目录
 #                     去平台后缀重命名推广到所有带 -linux_* 目录的发行版
@@ -81,6 +84,9 @@ L_SELECT_VERSION=">>> [3/8] Select version"
 L_SELECT_SOURCE="Select download source"
 L_SELECT_TYPE="Select distribution type"
 L_QUERY_VERSIONS="Querying available versions (takes a few seconds)..."
+L_CHECKSUM_VERIFY="Verifying checksum..."
+L_ERR_CHECKSUM="Checksum mismatch (%s): expected %s, got %s. The download may be corrupted or tampered with — aborted."
+L_WARN_NO_CHECKSUM="%s: no checksum available for this build, skipping integrity check."
 L_ERR_FETCH="Error: failed to fetch the release index:"
 L_ZULU_ERR="Error: no Zulu JDK package for this architecture/libc."
 L_NO_VERSION="Error: no release for this source/type/arch."
@@ -157,6 +163,9 @@ if [[ "${LANG:-}" == *"zh_"* ]]; then
   L_SELECT_SOURCE="选择下载源"
   L_SELECT_TYPE="选择发行类型"
   L_QUERY_VERSIONS="查询可用版本（需几秒钟）..."
+  L_CHECKSUM_VERIFY="正在校验完整性..."
+  L_ERR_CHECKSUM="校验和不匹配（%s）：期望 %s，实际 %s。下载可能已损坏或被篡改，已中止。"
+  L_WARN_NO_CHECKSUM="%s：该版本没有可用的校验和来源，跳过完整性检查。"
   L_ERR_FETCH="错误：获取版本索引失败："
   L_ZULU_ERR="错误：该架构/libc 下没有可用的 Zulu JDK 包。"
   L_NO_VERSION="错误：该下载源/类型/架构下没有可用版本。"
@@ -575,6 +584,11 @@ echo -e "${BLUE}${L_SELECT_VERSION}${NC}"
 MAJOR=""
 VERSION=""
 DOWNLOAD_URL=""
+# integrity check, set per distro: algo (sha256|sha1|md5) + expected hash
+# fetched from the trusted origin (API response or sidecar file, never the
+# download proxy); empty = no source, warn and skip
+CHECKSUM_ALGO=""
+CHECKSUM_EXPECTED=""
 
 if [ "$DISTRO" = "dragonwell" ]; then
   # URL key for this arch (Dragonwell musl builds are x64-only: apurl)
@@ -677,6 +691,10 @@ elif [ "$DISTRO" = "zulu" ]; then
   [ -n "$ZULU_PKG" ] || die "${L_ZULU_ERR}"
   VERSION="$(jq -r '.distro_version | map(tostring) | join(".")' <<<"$ZULU_PKG") / Java $(jq -r '.java_version | map(tostring) | join(".")' <<<"$ZULU_PKG")"
   DOWNLOAD_URL="$(jq -r '.download_url' <<<"$ZULU_PKG")"
+  CHECKSUM_ALGO="md5"
+  CHECKSUM_EXPECTED="$(curl -fsSL --retry 2 --connect-timeout 15 \
+    "https://api.azul.com/metadata/v1/zulu/packages/$(jq -r '.package_uuid' <<<"$ZULU_PKG")" 2>/dev/null \
+    | jq -r '.md5_hash // empty' || true)"
 elif [ "$DISTRO" = "temurin" ]; then
   # Adoptium v3: one call lists majors, per-major "latest" gives the asset;
   # musl systems use the alpine-linux platform
@@ -702,6 +720,8 @@ elif [ "$DISTRO" = "temurin" ]; then
   VERSION="$(jq -r '.[0].release_name // empty' <<<"${TEM_ASSET}")"
   DOWNLOAD_URL="$(jq -r '.[0].binary.package.link // empty' <<<"${TEM_ASSET}")"
   [ -n "$VERSION" ] && [ -n "$DOWNLOAD_URL" ] || die "${L_NO_VERSION}"
+  CHECKSUM_ALGO="sha256"
+  CHECKSUM_EXPECTED="$(jq -r '.[0].binary.package.checksum // empty' <<<"${TEM_ASSET}")"
 elif [ "$DISTRO" = "corretto" ]; then
   # fixed "latest" URL pattern; majors are Corretto's LTS lines; the real
   # version comes from the redirect Location header
@@ -752,6 +772,8 @@ elif [ "$DISTRO" = "liberica" ]; then
   [ -n "$LIB_ROW" ] && [ "$LIB_ROW" != "null" ] || die "${L_NO_VERSION}"
   VERSION="$(jq -r '.version' <<<"${LIB_ROW}")"
   DOWNLOAD_URL="$(jq -r '.downloadUrl' <<<"${LIB_ROW}")"
+  CHECKSUM_ALGO="sha1"
+  CHECKSUM_EXPECTED="$(jq -r '.sha1 // empty' <<<"${LIB_ROW}")"
 elif [ "$DISTRO" = "kona" ]; then
   # GitHub releases/latest per major repo; asset names like
   # TencentKona-21.0.12.b1-jdk_linux-x86_64.tar.gz
@@ -782,6 +804,8 @@ elif [ "$DISTRO" = "kona" ]; then
   MAJOR="$(cut -f1 <<<"$K_ROW")"
   VERSION="$(cut -f2 <<<"$K_ROW")"
   DOWNLOAD_URL="$(cut -f3 <<<"$K_ROW")"
+  CHECKSUM_ALGO="sha256"
+  CHECKSUM_EXPECTED="$(jq -r '.digest // empty' <<<"${K_ASSET}" | sed -E 's/^sha256://')"
 else
   # BiSheng: HuaweiCloud mirror has a plain autoindex listing; parse it and
   # take the newest file per major (8u492 -> sort key 8.492 for sort -V)
@@ -817,6 +841,9 @@ else
   [ -n "$B_FILE" ] || die "${L_NO_VERSION}"
   VERSION="$(printf '%s' "${B_FILE}" | sed -E 's/^bisheng-jdk-//; s/-linux-.*$//')"
   DOWNLOAD_URL="https://mirrors.huaweicloud.com/kunpeng/archive/compiler/bisheng_jdk/${B_FILE}"
+  CHECKSUM_ALGO="sha256"
+  CHECKSUM_EXPECTED="$(curl -fsSL --retry 2 --connect-timeout 15 \
+    "${DOWNLOAD_URL}.sha256" 2>/dev/null | awk '{print $1}' || true)"
 fi
 
 ASSET_NAME="${DOWNLOAD_URL##*/}"
@@ -847,6 +874,29 @@ echo -e "${BLUE}${L_DOWNLOAD}${NC}  ${ASSET_NAME}"
 ARCHIVE="${WORK_DIR}/jdk.tar.gz"
 download_file "${ARCHIVE}" "${DOWNLOAD_URL}" \
   || die "${L_ERR_DOWNLOAD} ${DOWNLOAD_URL}"
+
+# --- integrity check ----------------------------------------------------------
+# expected hash comes from the trusted origin (API/sidecar), the archive may
+# come from a mirror -- a mismatch here means corruption or tampering
+if [ -n "${CHECKSUM_EXPECTED}" ]; then
+  echo -e "${BLUE}${L_CHECKSUM_VERIFY}${NC}"
+  EXPECTED_NORM="$(printf '%s' "${CHECKSUM_EXPECTED}" | tr -d ' -' | tr '[:upper:]' '[:lower:]')"
+  if [[ "${EXPECTED_NORM}" =~ ^[0-9a-f]{32,64}$ ]]; then
+    case "${CHECKSUM_ALGO}" in
+      sha256) ACTUAL_HASH="$(sha256sum "${ARCHIVE}" | awk '{print $1}')" ;;
+      sha1)   ACTUAL_HASH="$(sha1sum "${ARCHIVE}" | awk '{print $1}')" ;;
+      md5)    ACTUAL_HASH="$(md5sum "${ARCHIVE}" | awk '{print $1}')" ;;
+      *)      ACTUAL_HASH="" ;;
+    esac
+    if [ "${ACTUAL_HASH}" != "${EXPECTED_NORM}" ]; then
+      die "$(printf "${L_ERR_CHECKSUM}" "${CHECKSUM_ALGO}" "${EXPECTED_NORM}" "${ACTUAL_HASH:-none}")"
+    fi
+  else
+    echo -e "${YELLOW}$(printf "${L_WARN_NO_CHECKSUM}" "${DISTRO_LABEL}")${NC}"
+  fi
+else
+  echo -e "${YELLOW}$(printf "${L_WARN_NO_CHECKSUM}" "${DISTRO_LABEL}")${NC}"
+fi
 
 # --- [6/8] extract + registry -------------------------------------------------
 echo -e "${BLUE}${L_INSTALL} ${INSTALL_DIR}${NC}"

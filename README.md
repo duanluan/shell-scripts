@@ -205,6 +205,7 @@ Get-ScheduledTask -TaskName "Codex Headroom Port Monitor"
 - 功能：交互式安装七个发行版的 OpenJDK——Azul Zulu、Eclipse Temurin、Amazon Corretto、Alibaba Dragonwell、BellSoft Liberica、Tencent Kona、毕昇 JDK（华为 openEuler），自动识别架构（x64/aarch64/riscv64、Alpine musl 优先 musl 构建），并支持已装版本检查与更新。
 - 版本数据源均为各官方 API/索引：dragonwell-jdk.io、api.azul.com、api.adoptium.net、corretto.aws、api.bell-sw.com、GitHub Releases（Kona）、华为云镜像 autoindex（毕昇）。
 - GitHub 托管的发行版下载走 gh-proxy 系镜像回退（与自更新同一套镜像列表）。
+- 完整性校验：下载后按官方来源比对哈希（Adoptium API/GitHub asset digest 的 sha256、bell-sw API 的 sha1、Azul API 的 md5、华为云镜像旁挂 `.sha256`），失配即中止；无校验来源的发行版（Corretto、Dragonwell）跳过并警告。
 - 关键流程：依赖检查（六种包管理器自动安装）-> 配置安装目录与 JAVA_HOME 范围（默认跳过；可选全局 `/etc/profile.d` / 当前用户 rc）-> 选择发行版与版本（菜单按大版本倒序、标注 LTS）-> 对照安装登记表提示已是最新或更新 -> 下载解压 -> 写环境变量。
 - 安装登记：`${INSTALL_DIR}/.install-jdk.db` 记录每个 发行版+大版本 的安装；重装同版本会询问，更新可选删除旧目录。
 - 稳定软链接：可选创建 `${INSTALL_DIR}/jdk<大版本>` 指向实际安装目录（默认创建），环境变量指向软链接时更新后 `JAVA_HOME` 无需修改。
