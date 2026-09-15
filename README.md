@@ -13,7 +13,7 @@
 | `github-mirror-axel.sh` | 用镜像包装 `axel` 下载 GitHub 资源 | 通用 Linux | 会创建缓存文件、自我更新 |
 | `github-wrappers.sh` | 包装 `curl`/`wget`，自动改写 GitHub URL | 交互式 shell | 仅当前 shell 生效 |
 | `install-hmcl.sh` | 手动方式安装最新 HMCL 并创建桌面启动器 | Linux 桌面 | 会写 `~/.local/share/hmcl` 和 `.desktop` 文件 |
-| `install-jdk.sh` | 交互式下载安装 Zulu/Dragonwell JDK，支持已装版本检查与更新 | 通用 Linux（六种包管理器自动装依赖） | 会写 `/opt/java`、`/etc/profile.d`（或用户 rc 文件）、会自我更新 |
+| `install-jdk.sh` | 交互式下载安装七个发行版的 OpenJDK（Zulu/Temurin/Corretto/Dragonwell/Liberica/Kona/毕昇），支持已装版本检查与更新 | 通用 Linux（六种包管理器自动装依赖） | 会写 `/opt/java`、`/etc/profile.d`（或用户 rc 文件）、会自我更新 |
 | `install-launcherx-bin.sh` | 自动更新并构建 AUR `launcherx-bin` | Arch Linux | 会执行 `makepkg -si` 安装 |
 | `navicat-manager.sh` | 管理 Navicat Linux 配置：备份、恢复、检查和 reset | Linux 桌面 + Navicat 16/17 | 会读写 `~/.config/navicat` 和对应 dconf 项，会创建缓存文件、自我更新 |
 | `prepare-jetbrains-zh-plugin.sh` | 自动为 JetBrains 系 IDE 准备可从磁盘安装的中文语言包 | Linux + JetBrains IDE 安装目录 | 会下载或重打包插件 jar 到本地 |
@@ -202,7 +202,9 @@ Get-ScheduledTask -TaskName "Codex Headroom Port Monitor"
   - 若本地已是相同版本，交互式终端会询问是否强制重装；非交互式调用会直接退出。
 
 ### `install-jdk.sh`
-- 功能：交互式安装多发行版 JDK（Alibaba Dragonwell / Azul Zulu），自动识别架构（x64/aarch64/riscv64、Alpine musl 优先 musl 构建），并支持已装版本检查与更新。
+- 功能：交互式安装七个发行版的 OpenJDK——Azul Zulu、Eclipse Temurin、Amazon Corretto、Alibaba Dragonwell、BellSoft Liberica、Tencent Kona、毕昇 JDK（华为 openEuler），自动识别架构（x64/aarch64/riscv64、Alpine musl 优先 musl 构建），并支持已装版本检查与更新。
+- 版本数据源均为各官方 API/索引：dragonwell-jdk.io、api.azul.com、api.adoptium.net、corretto.aws、api.bell-sw.com、GitHub Releases（Kona）、华为云镜像 autoindex（毕昇）。
+- GitHub 托管的发行版下载走 gh-proxy 系镜像回退（与自更新同一套镜像列表）。
 - 关键流程：依赖检查（六种包管理器自动安装）-> 配置安装目录与 JAVA_HOME 范围（默认跳过；可选全局 `/etc/profile.d` / 当前用户 rc）-> 选择发行版与版本（菜单按大版本倒序、标注 LTS）-> 对照安装登记表提示已是最新或更新 -> 下载解压 -> 写环境变量。
 - 安装登记：`${INSTALL_DIR}/.install-jdk.db` 记录每个 发行版+大版本 的安装；重装同版本会询问，更新可选删除旧目录。
 - 稳定软链接：可选创建 `${INSTALL_DIR}/jdk<大版本>` 指向实际安装目录（默认创建），环境变量指向软链接时更新后 `JAVA_HOME` 无需修改。
